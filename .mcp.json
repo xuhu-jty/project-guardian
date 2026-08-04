@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "project-guardian": {
+      "command": "python",
+      "args": ["./scripts/project_guardian_mcp.py"],
+      "startup_timeout_sec": 15,
+      "tool_timeout_sec": 120
+    }
+  }
+}

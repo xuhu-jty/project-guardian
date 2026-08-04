@@ -1,0 +1,34 @@
+{
+  "description": "Load Project Guardian context and enforce writer-role ownership, scoped edits, and user-confirmed merges.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/hooks/session_context.py\"",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\hooks\\session_context.py\"",
+            "timeout": 10,
+            "additionalContextLimit": 1800,
+            "statusMessage": "Loading project guardrails"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch|Edit|Write|Bash|shell_command|exec_command|functions.exec|exec",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${PLUGIN_ROOT}/hooks/guard_tool.py\"",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\hooks\\guard_tool.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking project scope"
+          }
+        ]
+      }
+    ]
+  }
+}
