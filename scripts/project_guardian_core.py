@@ -18,9 +18,71 @@ from typing import Any, Iterable
 import project_guardian_inventory as inventory
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 WORK_ITEM_KINDS = {"question", "bug", "feature", "refactor", "architecture", "maintenance"}
+REQUIREMENT_PROFILES = {"product", "internal", "defect"}
+CONTRACT_PHASES = {"discovery", "solution_design", "design_review", "ready"}
+DECISION_SIGNALS = {
+    "user_visible_behavior",
+    "scope_or_priority",
+    "business_rule",
+    "data_or_privacy",
+    "external_contract",
+    "commercial_tradeoff",
+    "irreversible_or_costly",
+    "requirements_conflict",
+    "low_confidence",
+}
+CONTRACT_UPDATE_FIELDS = {
+    "problem_statement",
+    "goal",
+    "stakeholders",
+    "user_scenarios",
+    "current_state",
+    "functional_requirements",
+    "quality_requirements",
+    "constraints",
+    "preferences",
+    "assumptions",
+    "acceptance_criteria",
+    "non_goals",
+    "protected_behaviors",
+}
+CONTRACT_LIST_FIELDS = CONTRACT_UPDATE_FIELDS - {"problem_statement", "goal", "current_state"}
+REQUIRED_CONTRACT_FIELDS = {
+    "product": (
+        "problem_statement",
+        "goal",
+        "stakeholders",
+        "user_scenarios",
+        "current_state",
+        "functional_requirements",
+        "constraints",
+        "acceptance_criteria",
+        "non_goals",
+        "protected_behaviors",
+    ),
+    "internal": (
+        "goal",
+        "current_state",
+        "functional_requirements",
+        "constraints",
+        "acceptance_criteria",
+        "non_goals",
+        "protected_behaviors",
+    ),
+    "defect": (
+        "problem_statement",
+        "goal",
+        "user_scenarios",
+        "current_state",
+        "acceptance_criteria",
+        "non_goals",
+        "protected_behaviors",
+    ),
+}
 EVIDENCE_KINDS = {
+    "automated_guard",
     "baseline",
     "target",
     "related",
@@ -31,6 +93,10 @@ EVIDENCE_KINDS = {
     "architecture",
 }
 ACTIVE_STATUSES = {
+    "discovering_requirements",
+    "needs_user_decision",
+    "designing_solution",
+    "reviewing_design",
     "defined",
     "diagnosing",
     "scoped",
@@ -41,7 +107,12 @@ ACTIVE_STATUSES = {
     "blocked",
 }
 READY_ONBOARDING_STATUSES = {"ready", "ready_with_warnings"}
-MODEL_ORCHESTRATION_PROFILE = "adaptive-risk-v1"
+MODEL_ORCHESTRATION_PROFILE = "adaptive-risk-v2"
+PREVIOUS_ADAPTIVE_ORCHESTRATION_PROFILE = "adaptive-risk-v1"
+ADAPTIVE_ORCHESTRATION_PROFILES = {
+    PREVIOUS_ADAPTIVE_ORCHESTRATION_PROFILE,
+    MODEL_ORCHESTRATION_PROFILE,
+}
 LEGACY_FIXED_ORCHESTRATION_PROFILE = "sol-luna-sol"
 ORCHESTRATION_STAGES = {"planning", "execution", "review", "major_fix", "final_review"}
 ORCHESTRATION_STATUSES = {"created", "running", "completed", "blocked", "failed"}
@@ -95,7 +166,7 @@ JUDGMENT_EXECUTION_SIGNALS = {
     "repeated_failure",
     "scope_drift",
 }
-RISK_ROUTE_MODELS = {
+PREVIOUS_RISK_ROUTE_MODELS = {
     "low": {
         "planning": ("gpt-5.6-terra", "medium"),
         "execution": ("gpt-5.6-luna", "high"),
@@ -109,6 +180,24 @@ RISK_ROUTE_MODELS = {
     "high": {
         "planning": ("gpt-5.6-sol", "xhigh"),
         "execution_focused": ("gpt-5.6-luna", "xhigh"),
+        "execution_judgment": ("gpt-5.6-terra", "xhigh"),
+        "review": ("gpt-5.6-sol", "xhigh"),
+    },
+}
+RISK_ROUTE_MODELS = {
+    "low": {
+        "planning": ("gpt-5.6-terra", "medium"),
+        "execution": ("gpt-5.6-luna", "max"),
+        "review": ("gpt-5.6-terra", "medium"),
+    },
+    "standard": {
+        "planning": ("gpt-5.6-terra", "high"),
+        "execution": ("gpt-5.6-luna", "max"),
+        "review": ("gpt-5.6-terra", "high"),
+    },
+    "high": {
+        "planning": ("gpt-5.6-sol", "max"),
+        "execution_focused": ("gpt-5.6-luna", "max"),
         "execution_judgment": ("gpt-5.6-terra", "xhigh"),
         "review": ("gpt-5.6-sol", "xhigh"),
     },
@@ -138,6 +227,23 @@ STAGE_ROLE_LABELS = {
     "final_review": "最终复审",
 }
 
+AUTOMATED_GUARD_SENSITIVE_PATHS = (
+    "**/migrations/**",
+    "**/migration/**",
+    "**/schema/**",
+    "**/schemas/**",
+    "**/protocol/**",
+    "**/protocols/**",
+    "**/auth/**",
+    "**/security/**",
+    "**/package.json",
+    "**/package-lock.json",
+    "**/pnpm-lock.yaml",
+    "**/yarn.lock",
+    "**/*.csproj",
+    "**/*.sln",
+)
+
 ONBOARDING_LABELS = {
     "not_scanned": "尚未扫描",
     "needs_base_selection": "需判断真实代码基线",
@@ -148,6 +254,10 @@ ONBOARDING_LABELS = {
 }
 
 WORK_ITEM_STATUS_LABELS = {
+    "discovering_requirements": "正在问清需求",
+    "needs_user_decision": "需要你决定",
+    "designing_solution": "正在比较方案",
+    "reviewing_design": "正在审查需求文档",
     "defined": "需求已登记",
     "diagnosing": "正在找原因",
     "scoped": "范围已锁定",
@@ -159,6 +269,13 @@ WORK_ITEM_STATUS_LABELS = {
     "completed": "已完成",
 }
 
+CONTRACT_PHASE_LABELS = {
+    "discovery": "需求访谈",
+    "solution_design": "方案设计",
+    "design_review": "文档审查",
+    "ready": "可执行合同",
+}
+
 
 class GuardianError(RuntimeError):
     pass
@@ -166,6 +283,227 @@ class GuardianError(RuntimeError):
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _clean_text_list(values: Iterable[Any] | None) -> list[str]:
+    return list(dict.fromkeys(str(value).strip() for value in (values or []) if str(value).strip()))
+
+
+def _requirement_profile_for_kind(kind: str) -> str:
+    if kind == "bug":
+        return "defect"
+    if kind in {"refactor", "maintenance"}:
+        return "internal"
+    return "product"
+
+
+def _empty_design_contract(original_request: str, profile: str) -> dict[str, Any]:
+    return {
+        "original_request": original_request.strip(),
+        "discovery_mode": "adaptive",
+        "profile": profile,
+        "phase": "discovery",
+        "revision": 1,
+        "problem_statement": "",
+        "goal": "",
+        "stakeholders": [],
+        "user_scenarios": [],
+        "current_state": "",
+        "functional_requirements": [],
+        "quality_requirements": [],
+        "constraints": [],
+        "preferences": [],
+        "assumptions": [],
+        "acceptance_criteria": [],
+        "non_goals": [],
+        "protected_behaviors": [],
+        "clarified_summary": None,
+        "open_question": None,
+        "question_log": [],
+        "approaches": [],
+        "recommendation": None,
+        "selected_approach": None,
+        "open_decision": None,
+        "decision_log": [],
+        "revision_history": [],
+        "review": None,
+        "updated_at": utc_now(),
+    }
+
+
+def _upgrade_contract(contract: dict[str, Any], kind: str) -> bool:
+    changed = False
+    defaults: dict[str, Any] = {
+        "discovery_mode": "legacy",
+        "profile": _requirement_profile_for_kind(kind),
+        "phase": "ready",
+        "revision": 1,
+        "problem_statement": "",
+        "stakeholders": [],
+        "user_scenarios": [],
+        "current_state": "",
+        "functional_requirements": [],
+        "quality_requirements": [],
+        "constraints": [],
+        "preferences": [],
+        "assumptions": [],
+        "clarified_summary": contract.get("goal"),
+        "open_question": None,
+        "question_log": [],
+        "approaches": [],
+        "recommendation": None,
+        "selected_approach": None,
+        "open_decision": None,
+        "decision_log": [],
+        "revision_history": [],
+        "review": {"outcome": "legacy_ready", "summary": "升级前已定义的执行合同"},
+        "updated_at": utc_now(),
+    }
+    for key, value in defaults.items():
+        if key not in contract:
+            contract[key] = value
+            changed = True
+    return changed
+
+
+def _contract_missing_dimensions(contract: dict[str, Any]) -> list[str]:
+    if contract.get("discovery_mode") != "adaptive":
+        return []
+    profile = contract.get("profile")
+    required = REQUIRED_CONTRACT_FIELDS.get(profile, ())
+    return [field for field in required if not contract.get(field)]
+
+
+def _contract_ready(item: dict[str, Any]) -> bool:
+    contract = item.get("contract") or {}
+    if contract.get("discovery_mode") != "adaptive":
+        return bool(contract.get("original_request") and contract.get("goal"))
+    return (
+        contract.get("phase") == "ready"
+        and not _contract_missing_dimensions(contract)
+        and bool(contract.get("selected_approach"))
+        and (contract.get("review") or {}).get("outcome") == "passed"
+    )
+
+
+def _contract_phase_status(phase: str) -> str:
+    return {
+        "discovery": "discovering_requirements",
+        "solution_design": "designing_solution",
+        "design_review": "reviewing_design",
+        "ready": "defined",
+    }.get(phase, "defined")
+
+
+def _run_matches_contract_revision(item: dict[str, Any], run: dict[str, Any]) -> bool:
+    contract = item.get("contract") or {}
+    if contract.get("discovery_mode") != "adaptive":
+        return True
+    return run.get("contract_revision") == contract.get("revision")
+
+
+def _touch_contract(contract: dict[str, Any]) -> None:
+    contract["revision"] = int(contract.get("revision", 0)) + 1
+    contract["updated_at"] = utc_now()
+
+
+def _design_contract_view(item: dict[str, Any], include_markdown: bool = False) -> dict[str, Any]:
+    contract = item.get("contract") or {}
+    selected = contract.get("selected_approach") or {}
+    view = {
+        "item_id": item.get("id"),
+        "title": item.get("title"),
+        "status": item.get("status"),
+        "status_label": WORK_ITEM_STATUS_LABELS.get(item.get("status"), item.get("status")),
+        "discovery_mode": contract.get("discovery_mode", "legacy"),
+        "profile": contract.get("profile"),
+        "phase": contract.get("phase", "ready"),
+        "phase_label": CONTRACT_PHASE_LABELS.get(contract.get("phase", "ready"), contract.get("phase")),
+        "revision": contract.get("revision", 1),
+        "requirements_complete": not _contract_missing_dimensions(contract),
+        "missing_dimensions": _contract_missing_dimensions(contract),
+        "open_question": contract.get("open_question"),
+        "open_decision": contract.get("open_decision"),
+        "recommendation": contract.get("recommendation"),
+        "selected_approach": selected,
+        "review": contract.get("review"),
+        "contract": contract,
+        "artifact_uri": f"guardian://work-items/{item.get('id')}/design-contract",
+    }
+    if include_markdown:
+        view["markdown"] = _render_design_contract_markdown(item)
+    return view
+
+
+def _markdown_list(values: Iterable[str]) -> str:
+    cleaned = _clean_text_list(values)
+    return "\n".join(f"- {value}" for value in cleaned) if cleaned else "- 暂无"
+
+
+def _render_design_contract_markdown(item: dict[str, Any]) -> str:
+    contract = item.get("contract") or {}
+    approaches = contract.get("approaches") or []
+    approach_text = []
+    for approach in approaches:
+        approach_text.extend(
+            [
+                f"### {approach.get('name', approach.get('id', '方案'))}",
+                str(approach.get("summary") or ""),
+                f"- 需求匹配：{approach.get('fit_score', '未评分')}/10",
+                f"- 工作量：{approach.get('effort', '未知')}；风险：{approach.get('risk', '未知')}",
+                f"- 优点：{'；'.join(approach.get('pros') or []) or '暂无'}",
+                f"- 缺点：{'；'.join(approach.get('cons') or []) or '暂无'}",
+            ]
+        )
+    selected = contract.get("selected_approach") or {}
+    review = contract.get("review") or {}
+    return "\n".join(
+        [
+            f"# 需求与设计合同：{item.get('title', '')}",
+            "",
+            f"状态：{CONTRACT_PHASE_LABELS.get(contract.get('phase', 'ready'), contract.get('phase', 'ready'))}",
+            f"版本：{contract.get('revision', 1)}",
+            "",
+            "## 用户原始要求",
+            str(contract.get("original_request") or ""),
+            "",
+            "## 问题与目标",
+            str(contract.get("problem_statement") or "暂无单独的问题描述"),
+            "",
+            str(contract.get("goal") or "暂无明确目标"),
+            "",
+            "## 使用者与场景",
+            _markdown_list(contract.get("stakeholders") or []),
+            _markdown_list(contract.get("user_scenarios") or []),
+            "",
+            "## 已验证的当前状态",
+            str(contract.get("current_state") or "暂无"),
+            "",
+            "## 功能要求",
+            _markdown_list(contract.get("functional_requirements") or []),
+            "",
+            "## 质量与限制",
+            _markdown_list(contract.get("quality_requirements") or []),
+            _markdown_list(contract.get("constraints") or []),
+            "",
+            "## 验收标准",
+            _markdown_list(contract.get("acceptance_criteria") or []),
+            "",
+            "## 非目标与受保护行为",
+            _markdown_list(contract.get("non_goals") or []),
+            _markdown_list(contract.get("protected_behaviors") or []),
+            "",
+            "## 比较过的方案",
+            "\n".join(approach_text) if approach_text else "暂无",
+            "",
+            "## 推荐与最终方案",
+            str((contract.get("recommendation") or {}).get("reason") or "暂无推荐"),
+            str(selected.get("name") or selected.get("summary") or "尚未选择"),
+            "",
+            "## 文档审查",
+            str(review.get("summary") or "尚未审查"),
+        ]
+    ).strip() + "\n"
 
 
 def _empty_risk_assessment() -> dict[str, Any]:
@@ -192,22 +530,69 @@ def _derive_risk_route(kind: str, signals: Iterable[str]) -> tuple[str, str]:
     return level, execution_track
 
 
+def _orchestration_profile(item: dict[str, Any]) -> str:
+    return (item.get("orchestration") or {}).get("profile") or MODEL_ORCHESTRATION_PROFILE
+
+
+def _route_models(item: dict[str, Any]) -> dict[str, dict[str, tuple[str, str]]]:
+    if _orchestration_profile(item) == PREVIOUS_ADAPTIVE_ORCHESTRATION_PROFILE:
+        return PREVIOUS_RISK_ROUTE_MODELS
+    return RISK_ROUTE_MODELS
+
+
+def _review_mode(item: dict[str, Any]) -> str:
+    assessment = (item.get("orchestration") or {}).get("risk_assessment") or {}
+    if _orchestration_profile(item) == MODEL_ORCHESTRATION_PROFILE and assessment.get("level") == "low":
+        return "automated_guard"
+    if assessment.get("level") == "standard":
+        return "focused"
+    return "full"
+
+
+def _major_stage_model(item: dict[str, Any], stage: str) -> tuple[str, str]:
+    if stage == "major_fix" and _orchestration_profile(item) == MODEL_ORCHESTRATION_PROFILE:
+        return "gpt-5.6-sol", "max"
+    return "gpt-5.6-sol", "xhigh"
+
+
 def _expected_stage_model(item: dict[str, Any], stage: str) -> tuple[str, str]:
     if stage in {"major_fix", "final_review"}:
-        return "gpt-5.6-sol", "xhigh"
+        return _major_stage_model(item, stage)
     assessment = (item.get("orchestration") or {}).get("risk_assessment") or {}
     if not assessment.get("assessed") or assessment.get("level") not in RISK_LEVELS:
         raise GuardianError("Assess the work item's risk before recording model stages")
     level = assessment["level"]
+    routes = _route_models(item)
     if stage == "execution" and level == "high":
         track = assessment.get("execution_track") or "focused"
-        return RISK_ROUTE_MODELS[level][f"execution_{track}"]
-    return RISK_ROUTE_MODELS[level][stage]
+        return routes[level][f"execution_{track}"]
+    return routes[level][stage]
+
+
+def _reasoning_effort_matches(run: dict[str, Any], expected_effort: str) -> bool:
+    actual = run.get("reasoning_effort")
+    if actual == expected_effort:
+        return True
+    return (
+        expected_effort == "max"
+        and actual == "xhigh"
+        and bool(run.get("capability_fallback"))
+        and bool(run.get("fallback_reason"))
+    )
 
 
 def _stage_label(item: dict[str, Any], stage: str) -> str:
     model, effort = _expected_stage_model(item, stage)
     return f"{MODEL_LABELS.get(model, model)} · {effort.capitalize()} {STAGE_ROLE_LABELS[stage]}"
+
+
+def _run_stage_label(run: dict[str, Any]) -> str:
+    model = MODEL_LABELS.get(run.get("model"), run.get("model", "未知模型"))
+    actual = str(run.get("reasoning_effort") or "").capitalize()
+    expected = str(run.get("expected_reasoning_effort") or "").capitalize()
+    effort = f"{expected}→{actual} 能力回退" if run.get("capability_fallback") else actual
+    role = STAGE_ROLE_LABELS.get(run.get("stage"), run.get("stage", "当前阶段"))
+    return f"{model} · {effort} {role}".replace(" ·  ", " ")
 
 
 def _risk_route_view(item: dict[str, Any]) -> dict[str, Any]:
@@ -223,7 +608,7 @@ def _risk_route_view(item: dict[str, Any]) -> dict[str, Any]:
             "stages": [],
         }
     stages = []
-    for stage in ("planning", "execution", "review"):
+    for stage in ("planning", "execution"):
         model, effort = _expected_stage_model(item, stage)
         stages.append(
             {
@@ -233,6 +618,33 @@ def _risk_route_view(item: dict[str, Any]) -> dict[str, Any]:
                 "model_label": MODEL_LABELS.get(model, model),
                 "reasoning_effort": effort,
                 "label": _stage_label(item, stage),
+                "fallback_reasoning_effort": "xhigh" if effort == "max" else None,
+            }
+        )
+    review_mode = _review_mode(item)
+    if review_mode == "automated_guard":
+        stages.append(
+            {
+                "stage": "automated_guard",
+                "role": "自动门禁",
+                "model": None,
+                "model_label": None,
+                "reasoning_effort": None,
+                "label": "自动范围、测试完整性与漂移门禁",
+                "fallback_review": _stage_label(item, "review"),
+            }
+        )
+    else:
+        model, effort = _expected_stage_model(item, "review")
+        stages.append(
+            {
+                "stage": "review",
+                "role": STAGE_ROLE_LABELS["review"],
+                "model": model,
+                "model_label": MODEL_LABELS.get(model, model),
+                "reasoning_effort": effort,
+                "label": _stage_label(item, "review"),
+                "review_mode": review_mode,
             }
         )
     return {
@@ -244,13 +656,15 @@ def _risk_route_view(item: dict[str, Any]) -> dict[str, Any]:
         "execution_track": assessment.get("execution_track"),
         "source": assessment.get("source", "automatic"),
         "assessed_at": assessment.get("assessed_at"),
+        "profile": _orchestration_profile(item),
+        "review_mode": review_mode,
         "stages": stages,
         "major_bug_route": [
             {
                 "stage": "major_fix",
                 "model": "gpt-5.6-sol",
-                "reasoning_effort": "xhigh",
-                "label": "GPT-5.6 Sol · Xhigh 修复重大 Bug",
+                "reasoning_effort": _major_stage_model(item, "major_fix")[1],
+                "label": _stage_label(item, "major_fix"),
             },
             {
                 "stage": "final_review",
@@ -360,7 +774,10 @@ def _upgrade_state(state: dict[str, Any]) -> bool:
     if "worktree_owner" not in settings:
         settings["worktree_owner"] = "codex"
         changed = True
-    if settings.get("model_orchestration_profile") == LEGACY_FIXED_ORCHESTRATION_PROFILE:
+    if settings.get("model_orchestration_profile") in {
+        LEGACY_FIXED_ORCHESTRATION_PROFILE,
+        PREVIOUS_ADAPTIVE_ORCHESTRATION_PROFILE,
+    }:
         settings["model_orchestration_profile"] = MODEL_ORCHESTRATION_PROFILE
         changed = True
     elif "model_orchestration_profile" not in settings:
@@ -385,6 +802,9 @@ def _upgrade_state(state: dict[str, Any]) -> bool:
             architecture[key] = default
             changed = True
     for item in state.setdefault("work_items", []):
+        contract = item.setdefault("contract", {})
+        if _upgrade_contract(contract, item.get("kind", "feature")):
+            changed = True
         if "task" not in item:
             item["task"] = None
             changed = True
@@ -400,7 +820,8 @@ def _upgrade_state(state: dict[str, Any]) -> bool:
             changed = True
         orchestration = item["orchestration"]
         if orchestration.get("profile") == LEGACY_FIXED_ORCHESTRATION_PROFILE:
-            orchestration["profile"] = MODEL_ORCHESTRATION_PROFILE
+            # Preserve already-started work on its original route. New work uses v2.
+            orchestration["profile"] = PREVIOUS_ADAPTIVE_ORCHESTRATION_PROFILE
             orchestration["risk_assessment"] = {
                 "assessed": True,
                 "level": "high",
@@ -411,7 +832,7 @@ def _upgrade_state(state: dict[str, Any]) -> bool:
                 "assessed_at": state.get("updated_at") or utc_now(),
             }
             changed = True
-        elif orchestration.get("profile") == MODEL_ORCHESTRATION_PROFILE and "risk_assessment" not in orchestration:
+        elif orchestration.get("profile") in ADAPTIVE_ORCHESTRATION_PROFILES and "risk_assessment" not in orchestration:
             orchestration["risk_assessment"] = _empty_risk_assessment()
             changed = True
     return changed
@@ -889,6 +1310,8 @@ def _project_guidance(project: dict[str, Any]) -> dict[str, Any]:
         )
     elif active_items:
         item = active_items[0]
+        contract = item.get("contract") or {}
+        contract_view = _design_contract_view(item)
         item_status = WORK_ITEM_STATUS_LABELS.get(item.get("status"), item.get("status", "进行中"))
         orchestration = item.get("orchestration") or {}
         runs = orchestration.get("runs", [])
@@ -896,29 +1319,63 @@ def _project_guidance(project: dict[str, Any]) -> dict[str, Any]:
         risk_text = RISK_LEVEL_LABELS.get(assessment.get("level"), "待自动判断风险")
         if runs:
             latest = runs[-1]
-            model_label = MODEL_LABELS.get(latest.get("model"), latest.get("model", "未知模型"))
-            effort = str(latest.get("reasoning_effort") or "").capitalize()
-            role = STAGE_ROLE_LABELS.get(latest.get("stage"), latest.get("stage", "当前阶段"))
-            latest_stage = f"{model_label} · {effort} {role}".replace(" ·  ", " ")
+            latest_stage = _run_stage_label(latest)
         elif assessment.get("assessed"):
             latest_stage = _stage_label(item, "planning")
         else:
             latest_stage = "自动判断任务风险与模型路线"
-        summary = f"当前优先任务是“{item['title']}”，状态：{item_status}，{risk_text}，当前步骤：{latest_stage}。"
-        primary = _follow_up_action(
-            "continue-work-item",
-            f"继续：{item['title']}",
-            f"使用 Project Guardian 继续项目 {root} 的工作项 {item['id']}。先读取任务合同、当前证据和允许修改范围，只继续尚未完成的下一步；完成本轮后重新打开项目图。",
-            "继续原任务和原工作树，避免重复开工。",
-            thread_id=(item.get("task") or {}).get("thread_id"),
-        )
+        if item.get("status") == "needs_user_decision":
+            decision = contract.get("open_question") or contract.get("open_decision") or {}
+            prompt_text = decision.get("prompt") or "当前方案存在一个需要你决定的产品取舍。"
+            summary = f"“{item['title']}”暂时没有开始写代码，因为需要你决定：{prompt_text}"
+            primary = _follow_up_action(
+                "answer-requirement-decision",
+                "回答这个需求问题",
+                f"继续项目 {root} 的工作项 {item['id']}。先读取 get_design_contract，只向我展示并解释当前唯一未决问题：{prompt_text}；收到我的回答后记录决定，再继续需求或方案流程。",
+                "这个选择会影响产品行为、范围或长期方案，所以 Guardian 不会替你猜。",
+                thread_id=(item.get("task") or {}).get("thread_id"),
+            )
+        elif item.get("status") == "discovering_requirements":
+            missing = "、".join(contract_view.get("missing_dimensions") or []) or "尚未确认的关键需求"
+            summary = f"“{item['title']}”正在问清真实需求，还没有创建开发工作树。当前需要补充：{missing}。"
+            primary = _follow_up_action(
+                "continue-requirement-discovery",
+                "继续问清需求",
+                f"使用 Project Guardian 继续项目 {root} 的工作项 {item['id']} 的需求访谈。先读取 get_design_contract 和已有项目事实，只问一个会改变方案、但当前仍缺失的问题；不要询问可从代码查到的技术细节。",
+                "回答会自动进入同一份需求与设计合同。",
+            )
+        elif item.get("status") == "designing_solution":
+            summary = f"“{item['title']}”的需求已经基本清楚，正在比较可行方案并选择当前条件下的最优解。"
+            primary = _follow_up_action(
+                "continue-solution-design",
+                "生成并比较方案",
+                f"使用 Project Guardian 继续项目 {root} 的工作项 {item['id']}。读取需求与设计合同，比较有实际差异的方案并给出最优推荐；只有存在重大取舍或低把握时才问我。",
+                "最小版本、完整版本和分阶段方案都只是候选，不预设答案。",
+            )
+        elif item.get("status") == "reviewing_design":
+            summary = f"“{item['title']}”已经选出方案，正在独立检查文档是否完整、一致、清晰、不过度扩张且可以实施。"
+            primary = _follow_up_action(
+                "review-design-contract",
+                "审查需求与设计文档",
+                f"使用 Project Guardian 审查项目 {root} 的工作项 {item['id']} 的设计合同。检查完整性、一致性、清晰度、范围和可行性；能从项目查明的问题自动修正文档，涉及用户意图时只问我一个问题。",
+                "文档通过前不会建立执行工作树。",
+            )
+        else:
+            summary = f"当前优先任务是“{item['title']}”，状态：{item_status}，{risk_text}，当前步骤：{latest_stage}。"
+            primary = _follow_up_action(
+                "continue-work-item",
+                f"继续：{item['title']}",
+                f"使用 Project Guardian 继续项目 {root} 的工作项 {item['id']}。先读取任务合同、当前证据和允许修改范围，只继续尚未完成的下一步；完成本轮后重新打开项目图。",
+                "继续原任务和原工作树，避免重复开工。",
+                thread_id=(item.get("task") or {}).get("thread_id"),
+            )
     else:
         summary = "项目已经接入。现在直接告诉 Codex：要增加什么功能，或者哪里表现不对。"
         primary = _follow_up_action(
             "start-request",
             "开始一个新功能或问题",
-            f"我要为项目 {root} 提出一个新功能或问题。请先用一句小白能懂的话问我具体想实现什么或哪里不对；收到回答后使用 Project Guardian 自动判断复用还是新建任务，并选择正确工作树。",
-            "Guardian 会自动拆分、定位代码和选择任务；合并前才需要你确认。",
+            f"我要为项目 {root} 提出一个新项目、功能或问题。请使用 Project Guardian 自动识别类型：新项目或功能先建立需求访谈，问题先诊断；只问会改变方案的必要问题，需求清楚后再选择最优方案和工作树。",
+            "Guardian 会先问清需求、建立一份设计合同，再自动拆分、定位代码和选择任务。",
         )
 
     secondary = [
@@ -950,7 +1407,7 @@ def _project_guidance(project: dict[str, Any]) -> dict[str, Any]:
         "reopen": {
             "phrase": "打开项目图",
             "alternative_phrases": ["项目进度", "我下一步做什么", "查看分支和工作树"],
-            "instruction": "在这个项目的任意 Codex 任务里直接输入“打开项目图”。项目图会显示在回复下方，不是左侧固定页面。",
+            "instruction": "Guardian 每轮会在回复下方自动显示迷你项目图；需要完整内容时输入“打开项目图”。它不是左侧固定页面。",
         },
     }
 
@@ -1016,6 +1473,7 @@ def create_work_item(
             "created_at": utc_now(),
             "updated_at": utc_now(),
         }
+        _upgrade_contract(item["contract"], kind)
         project["work_items"].append(item)
         return item
 
@@ -1024,6 +1482,429 @@ def create_work_item(
 
 def get_work_item(project_root: str, item_id: str) -> dict[str, Any]:
     return _find_item(_load_project(project_root), item_id)
+
+
+def get_design_contract(project_root: str, item_id: str) -> dict[str, Any]:
+    """Return the single human- and agent-facing requirement/design document."""
+    return _design_contract_view(get_work_item(project_root, item_id), include_markdown=True)
+
+
+def start_requirement_discovery(
+    project_root: str,
+    title: str,
+    original_request: str,
+    kind: str,
+    profile: str,
+    parent_id: str | None = None,
+) -> dict[str, Any]:
+    """Start read-only product discovery before planning, task creation, or worktree binding."""
+    if kind not in WORK_ITEM_KINDS - {"question"}:
+        raise GuardianError(f"Requirement discovery needs a change kind, got: {kind}")
+    if profile not in REQUIREMENT_PROFILES:
+        raise GuardianError(f"Unsupported requirement profile: {profile}")
+    if not title.strip() or not original_request.strip():
+        raise GuardianError("title and original_request are required")
+
+    def mutate(project: dict[str, Any]):
+        if parent_id:
+            _find_item(project, parent_id)
+        now = utc_now()
+        item = {
+            "id": f"wi-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}",
+            "title": title.strip(),
+            "kind": kind,
+            "parent_id": parent_id,
+            "status": "discovering_requirements",
+            "contract": _empty_design_contract(original_request, profile),
+            "scope": {"allowed_changes": [], "impacted_nodes": [], "architecture_notes": []},
+            "base_commit": None,
+            "branch": None,
+            "worktree_path": None,
+            "task": None,
+            "orchestration": {
+                "profile": project.get("settings", {}).get(
+                    "model_orchestration_profile", MODEL_ORCHESTRATION_PROFILE
+                ),
+                "risk_assessment": _empty_risk_assessment(),
+                "runs": [],
+            },
+            "last_scan": None,
+            "evidence": [],
+            "scope_conflicts": [],
+            "depends_on": [],
+            "consecutive_failures": 0,
+            "architecture_review_required": kind == "architecture",
+            "created_at": now,
+            "updated_at": now,
+        }
+        project["work_items"].append(item)
+        return _design_contract_view(item)
+
+    return _mutate_project(project_root, mutate)
+
+
+def update_requirement_discovery(
+    project_root: str,
+    item_id: str,
+    updates: dict[str, Any] | None = None,
+    resolved_question_id: str | None = None,
+    answer: str | None = None,
+    next_question: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist clarified facts and at most one next product question."""
+    updates = updates or {}
+    unsupported = sorted(set(updates) - CONTRACT_UPDATE_FIELDS)
+    if unsupported:
+        raise GuardianError(f"Unsupported contract updates: {', '.join(unsupported)}")
+
+    def mutate(project: dict[str, Any]):
+        item = _find_item(project, item_id)
+        contract = item.get("contract") or {}
+        if contract.get("discovery_mode") != "adaptive":
+            raise GuardianError("This work item does not use adaptive requirement discovery")
+        if contract.get("phase") not in {"discovery", "solution_design", "design_review"}:
+            raise GuardianError("A ready design contract cannot be silently rewritten; start a new revision item")
+
+        open_question = contract.get("open_question")
+        if resolved_question_id:
+            if not open_question or open_question.get("id") != resolved_question_id:
+                raise GuardianError("The resolved question does not match the single open question")
+            if not answer or not answer.strip():
+                raise GuardianError("A user answer is required to resolve the open question")
+            contract.setdefault("question_log", []).append(
+                {
+                    **open_question,
+                    "answer": answer.strip(),
+                    "answered_at": utc_now(),
+                    "source": "user",
+                }
+            )
+            contract["open_question"] = None
+        elif answer is not None:
+            raise GuardianError("answer requires resolved_question_id")
+
+        for field, value in updates.items():
+            if field in CONTRACT_LIST_FIELDS:
+                if not isinstance(value, list):
+                    raise GuardianError(f"Contract field {field} must be a list")
+                contract[field] = _clean_text_list(value)
+            else:
+                if not isinstance(value, str):
+                    raise GuardianError(f"Contract field {field} must be text")
+                contract[field] = value.strip()
+
+        if next_question:
+            if contract.get("open_question"):
+                raise GuardianError("Resolve the current requirement question before asking another")
+            prompt = str(next_question.get("prompt") or "").strip()
+            dimension = str(next_question.get("dimension") or "").strip()
+            reason = str(next_question.get("reason") or "").strip()
+            if not prompt or not dimension or not reason:
+                raise GuardianError("A requirement question needs dimension, prompt, and reason")
+            options = []
+            recommended_count = 0
+            for raw in next_question.get("options") or []:
+                option_id = str(raw.get("id") or "").strip()
+                label = str(raw.get("label") or "").strip()
+                description = str(raw.get("description") or "").strip()
+                recommended = bool(raw.get("recommended"))
+                if not option_id or not label or not description:
+                    raise GuardianError("Each requirement option needs id, label, and description")
+                recommended_count += int(recommended)
+                options.append(
+                    {"id": option_id, "label": label, "description": description, "recommended": recommended}
+                )
+            if recommended_count > 1:
+                raise GuardianError("Only one requirement option may be recommended")
+            contract["open_question"] = {
+                "id": f"rq-{uuid.uuid4().hex[:10]}",
+                "dimension": dimension,
+                "prompt": prompt,
+                "reason": reason,
+                "options": options,
+                "asked_at": utc_now(),
+            }
+            item["status"] = "needs_user_decision"
+        else:
+            item["status"] = _contract_phase_status(contract.get("phase", "discovery"))
+
+        _touch_contract(contract)
+        item["updated_at"] = utc_now()
+        return _design_contract_view(item)
+
+    return _mutate_project(project_root, mutate)
+
+
+def finalize_requirement_discovery(project_root: str, item_id: str, clarified_summary: str) -> dict[str, Any]:
+    if not clarified_summary.strip():
+        raise GuardianError("A clarified requirement summary is required")
+
+    def mutate(project: dict[str, Any]):
+        item = _find_item(project, item_id)
+        contract = item.get("contract") or {}
+        if contract.get("discovery_mode") != "adaptive" or contract.get("phase") != "discovery":
+            raise GuardianError("The work item is not in requirement discovery")
+        if contract.get("open_question"):
+            raise GuardianError("Resolve the open requirement question before finalizing discovery")
+        missing = _contract_missing_dimensions(contract)
+        if missing:
+            raise GuardianError("Requirement discovery is incomplete: " + ", ".join(missing))
+        contract["clarified_summary"] = clarified_summary.strip()
+        contract["phase"] = "solution_design"
+        item["status"] = "designing_solution"
+        _touch_contract(contract)
+        item["updated_at"] = utc_now()
+        return _design_contract_view(item)
+
+    return _mutate_project(project_root, mutate)
+
+
+def record_solution_design(
+    project_root: str,
+    item_id: str,
+    complexity: str,
+    approaches: list[dict[str, Any]],
+    recommendation_id: str,
+    recommendation_reason: str,
+    confidence: float,
+    decision_signals: list[str] | None = None,
+    decision_question: str | None = None,
+) -> dict[str, Any]:
+    if complexity not in {"simple", "nontrivial"}:
+        raise GuardianError("complexity must be simple or nontrivial")
+    if not 0 <= confidence <= 1:
+        raise GuardianError("confidence must be between 0 and 1")
+    signals = sorted(set(_clean_text_list(decision_signals)))
+    unsupported = sorted(set(signals) - DECISION_SIGNALS)
+    if unsupported:
+        raise GuardianError(f"Unsupported decision signals: {', '.join(unsupported)}")
+    if confidence < 0.75 and "low_confidence" not in signals:
+        signals.append("low_confidence")
+        signals.sort()
+    normalized = []
+    seen: set[str] = set()
+    for raw in approaches:
+        approach_id = str(raw.get("id") or "").strip()
+        name = str(raw.get("name") or "").strip()
+        summary = str(raw.get("summary") or "").strip()
+        if not approach_id or not name or not summary or approach_id in seen:
+            raise GuardianError("Each solution approach needs a unique id, name, and summary")
+        seen.add(approach_id)
+        fit_score = int(raw.get("fit_score", -1))
+        if not 0 <= fit_score <= 10:
+            raise GuardianError("Each approach fit_score must be between 0 and 10")
+        normalized.append(
+            {
+                "id": approach_id,
+                "name": name,
+                "summary": summary,
+                "fit_score": fit_score,
+                "effort": str(raw.get("effort") or "unknown").strip(),
+                "risk": str(raw.get("risk") or "unknown").strip(),
+                "pros": _clean_text_list(raw.get("pros")),
+                "cons": _clean_text_list(raw.get("cons")),
+                "reuses": _clean_text_list(raw.get("reuses")),
+            }
+        )
+    if not normalized or (complexity == "nontrivial" and len(normalized) < 2):
+        raise GuardianError("Nontrivial solution design requires at least two meaningfully different approaches")
+    if recommendation_id not in seen or not recommendation_reason.strip():
+        raise GuardianError("A valid recommendation and its requirement-based reason are required")
+
+    def mutate(project: dict[str, Any]):
+        item = _find_item(project, item_id)
+        contract = item.get("contract") or {}
+        if contract.get("discovery_mode") != "adaptive" or contract.get("phase") != "solution_design":
+            raise GuardianError("Complete requirement discovery before recording solution design")
+        if contract.get("open_question"):
+            raise GuardianError("Resolve the open requirement question before comparing solutions")
+        recommended = next(value for value in normalized if value["id"] == recommendation_id)
+        contract["approaches"] = normalized
+        contract["recommendation"] = {
+            "approach_id": recommendation_id,
+            "reason": recommendation_reason.strip(),
+            "confidence": confidence,
+            "decision_signals": signals,
+        }
+        if signals:
+            if not decision_question or not decision_question.strip():
+                raise GuardianError("A material trade-off requires one beginner-facing decision question")
+            contract["selected_approach"] = None
+            contract["open_decision"] = {
+                "id": f"decision-{uuid.uuid4().hex[:10]}",
+                "prompt": decision_question.strip(),
+                "reason": recommendation_reason.strip(),
+                "signals": signals,
+                "recommended_option_id": recommendation_id,
+                "options": [
+                    {
+                        "id": value["id"],
+                        "label": value["name"],
+                        "description": value["summary"],
+                        "recommended": value["id"] == recommendation_id,
+                    }
+                    for value in normalized
+                ],
+                "asked_at": utc_now(),
+            }
+            item["status"] = "needs_user_decision"
+        else:
+            contract["selected_approach"] = recommended
+            contract["open_decision"] = None
+            contract.setdefault("decision_log", []).append(
+                {
+                    "id": f"decision-{uuid.uuid4().hex[:10]}",
+                    "source": "guardian_recommendation",
+                    "selected_option_id": recommendation_id,
+                    "reason": recommendation_reason.strip(),
+                    "confidence": confidence,
+                    "decided_at": utc_now(),
+                }
+            )
+            contract["phase"] = "design_review"
+            item["status"] = "reviewing_design"
+        _touch_contract(contract)
+        item["updated_at"] = utc_now()
+        return _design_contract_view(item)
+
+    return _mutate_project(project_root, mutate)
+
+
+def record_solution_decision(
+    project_root: str,
+    item_id: str,
+    decision_id: str,
+    selected_option_id: str,
+    answer: str,
+) -> dict[str, Any]:
+    if not answer.strip():
+        raise GuardianError("The user's decision answer is required")
+
+    def mutate(project: dict[str, Any]):
+        item = _find_item(project, item_id)
+        contract = item.get("contract") or {}
+        decision = contract.get("open_decision")
+        if not decision or decision.get("id") != decision_id:
+            raise GuardianError("The resolved decision does not match the open solution decision")
+        approach = next(
+            (value for value in contract.get("approaches", []) if value.get("id") == selected_option_id),
+            None,
+        )
+        if approach is None:
+            raise GuardianError("The selected option is not one of the proposed solution approaches")
+        contract["selected_approach"] = approach
+        contract.setdefault("decision_log", []).append(
+            {
+                **decision,
+                "source": "user",
+                "selected_option_id": selected_option_id,
+                "answer": answer.strip(),
+                "decided_at": utc_now(),
+            }
+        )
+        contract["open_decision"] = None
+        contract["phase"] = "design_review"
+        item["status"] = "reviewing_design"
+        _touch_contract(contract)
+        item["updated_at"] = utc_now()
+        return _design_contract_view(item)
+
+    return _mutate_project(project_root, mutate)
+
+
+def review_design_contract(
+    project_root: str,
+    item_id: str,
+    reviewer_thread_id: str,
+    scores: dict[str, Any],
+    outcome: str,
+    summary: str,
+    findings: list[str] | None = None,
+) -> dict[str, Any]:
+    dimensions = {"completeness", "consistency", "clarity", "scope", "feasibility"}
+    if set(scores) != dimensions:
+        raise GuardianError("Design review scores must cover completeness, consistency, clarity, scope, and feasibility")
+    normalized_scores = {key: int(value) for key, value in scores.items()}
+    if any(value < 0 or value > 10 for value in normalized_scores.values()):
+        raise GuardianError("Design review scores must be between 0 and 10")
+    if outcome not in {"passed", "needs_revision"}:
+        raise GuardianError("Design review outcome must be passed or needs_revision")
+    if not reviewer_thread_id.strip() or not summary.strip():
+        raise GuardianError("reviewer_thread_id and summary are required")
+    if outcome == "passed" and min(normalized_scores.values()) < 7:
+        raise GuardianError("A design contract cannot pass while a review dimension is below 7")
+
+    def mutate(project: dict[str, Any]):
+        item = _find_item(project, item_id)
+        contract = item.get("contract") or {}
+        if contract.get("discovery_mode") != "adaptive" or contract.get("phase") != "design_review":
+            raise GuardianError("Select a solution approach before reviewing the design contract")
+        planning_threads = {
+            run.get("thread_id")
+            for run in (item.get("orchestration") or {}).get("runs", [])
+            if run.get("stage") == "planning"
+        }
+        if reviewer_thread_id.strip() in planning_threads:
+            raise GuardianError("The design contract needs a cold reviewer task, not the planning task that authored it")
+        if contract.get("open_question") or contract.get("open_decision"):
+            raise GuardianError("Resolve open user decisions before completing design review")
+        if not contract.get("selected_approach"):
+            raise GuardianError("Design review requires a selected solution approach")
+        missing = _contract_missing_dimensions(contract)
+        if missing:
+            raise GuardianError("Design contract is incomplete: " + ", ".join(missing))
+        contract["review"] = {
+            "outcome": outcome,
+            "summary": summary.strip(),
+            "scores": normalized_scores,
+            "findings": _clean_text_list(findings),
+            "reviewer_thread_id": reviewer_thread_id.strip(),
+            "reviewed_at": utc_now(),
+        }
+        if outcome == "passed":
+            contract["phase"] = "ready"
+            item["status"] = "defined"
+        else:
+            contract["phase"] = "solution_design"
+            item["status"] = "designing_solution"
+        _touch_contract(contract)
+        item["updated_at"] = utc_now()
+        return _design_contract_view(item, include_markdown=True)
+
+    return _mutate_project(project_root, mutate)
+
+
+def reopen_design_contract(project_root: str, item_id: str, reason: str) -> dict[str, Any]:
+    """Reopen a reviewed contract when implementation evidence invalidates the chosen design."""
+    if not reason.strip():
+        raise GuardianError("A concrete contract revision reason is required")
+
+    def mutate(project: dict[str, Any]):
+        item = _find_item(project, item_id)
+        contract = item.get("contract") or {}
+        if contract.get("discovery_mode") != "adaptive" or contract.get("phase") != "ready":
+            raise GuardianError("Only a reviewed adaptive design contract can be reopened")
+        contract.setdefault("revision_history", []).append(
+            {
+                "revision": contract.get("revision"),
+                "reason": reason.strip(),
+                "selected_approach_id": (contract.get("selected_approach") or {}).get("id"),
+                "review_summary": (contract.get("review") or {}).get("summary"),
+                "superseded_at": utc_now(),
+            }
+        )
+        contract["phase"] = "solution_design"
+        contract["review"] = None
+        contract["open_question"] = None
+        contract["open_decision"] = None
+        contract["selected_approach"] = None
+        item["status"] = "designing_solution"
+        item["merge_readiness"] = None
+        _touch_contract(contract)
+        item["updated_at"] = utc_now()
+        return _design_contract_view(item, include_markdown=True)
+
+    return _mutate_project(project_root, mutate)
 
 
 def assess_work_item_risk(
@@ -1045,7 +1926,7 @@ def assess_work_item_risk(
         if item.get("kind") == "question":
             raise GuardianError("Diagnosis-only work items do not use a model risk route")
         orchestration = item.setdefault("orchestration", {"profile": MODEL_ORCHESTRATION_PROFILE, "runs": []})
-        if orchestration.get("profile") not in {MODEL_ORCHESTRATION_PROFILE, "legacy"}:
+        if orchestration.get("profile") not in ADAPTIVE_ORCHESTRATION_PROFILES | {"legacy"}:
             raise GuardianError(f"Unsupported orchestration profile: {orchestration.get('profile')}")
         previous = orchestration.get("risk_assessment") or _empty_risk_assessment()
         runs = orchestration.get("runs", [])
@@ -1057,7 +1938,8 @@ def assess_work_item_risk(
         if runs and previous.get("assessed") and ranks[level] < ranks[previous["level"]]:
             raise GuardianError("Risk cannot be downgraded after a model stage has started")
         now = utc_now()
-        orchestration["profile"] = MODEL_ORCHESTRATION_PROFILE
+        if orchestration.get("profile") == "legacy":
+            orchestration["profile"] = MODEL_ORCHESTRATION_PROFILE
         orchestration["risk_assessment"] = {
             "assessed": True,
             "level": level,
@@ -1070,7 +1952,7 @@ def assess_work_item_risk(
         item["updated_at"] = now
         return {
             "item_id": item_id,
-            "profile": MODEL_ORCHESTRATION_PROFILE,
+            "profile": orchestration["profile"],
             "route": _risk_route_view(item),
             "previous_level": previous.get("level") if previous.get("assessed") else None,
             "existing_runs_revalidated": bool(runs),
@@ -1096,6 +1978,22 @@ def bind_work_item(
         raise GuardianError("thread_id is required")
     project = _load_project(project_root)
     item = _find_item(project, item_id)
+    if item["kind"] != "question" and not _contract_ready(item):
+        raise GuardianError("Complete and review the requirement/design contract before binding an execution worktree")
+    if (
+        item["kind"] != "question"
+        and (item.get("contract") or {}).get("discovery_mode") == "adaptive"
+        and _orchestration_profile(item) in ADAPTIVE_ORCHESTRATION_PROFILES
+    ):
+        latest_plan = _latest_stage_run(item, {"planning"})
+        if (
+            not latest_plan
+            or latest_plan.get("status") != "completed"
+            or latest_plan.get("outcome") != "ready"
+            or not _run_matches_current_route(item, latest_plan, "planning")
+            or not _run_matches_contract_revision(item, latest_plan)
+        ):
+            raise GuardianError("Bind requires completed planning for the current design-contract revision and risk route")
     normalized_worktree = normalize_path(worktree_path) if worktree_path else None
     if item["kind"] != "question" and not normalized_worktree:
         raise GuardianError("Change items must bind to the Codex task's Git worktree")
@@ -1153,7 +2051,7 @@ def _latest_stage_run(item: dict[str, Any], stages: set[str]) -> dict[str, Any] 
 
 def _run_matches_current_route(item: dict[str, Any], run: dict[str, Any], stage: str) -> bool:
     expected_model, expected_effort = _expected_stage_model(item, stage)
-    return run.get("model") == expected_model and run.get("reasoning_effort") == expected_effort
+    return run.get("model") == expected_model and _reasoning_effort_matches(run, expected_effort)
 
 
 def record_task_stage(
@@ -1168,6 +2066,7 @@ def record_task_stage(
     outcome: str | None = None,
     artifact: str | None = None,
     host_id: str | None = None,
+    fallback_reason: str | None = None,
 ) -> dict[str, Any]:
     if stage not in ORCHESTRATION_STAGES:
         raise GuardianError(f"Unsupported orchestration stage: {stage}")
@@ -1189,17 +2088,28 @@ def record_task_stage(
         raise GuardianError("Diagnosis-only work items do not use the implementation model pipeline")
     if profile == "legacy":
         raise GuardianError("Assess the work item's risk before starting the adaptive model pipeline")
-    if profile != MODEL_ORCHESTRATION_PROFILE:
+    if profile not in ADAPTIVE_ORCHESTRATION_PROFILES:
         raise GuardianError(f"Unsupported orchestration profile: {profile}")
     expected_model, expected_effort = _expected_stage_model(item, stage)
-    if model != expected_model or reasoning_effort != expected_effort:
+    capability_fallback = (
+        model == expected_model
+        and expected_effort == "max"
+        and reasoning_effort == "xhigh"
+        and bool(fallback_reason and fallback_reason.strip())
+    )
+    if model != expected_model or (reasoning_effort != expected_effort and not capability_fallback):
         raise GuardianError(
-            f"Stage {stage} requires {expected_model} with {expected_effort} reasoning for the current risk route"
+            f"Stage {stage} requires {expected_model} with {expected_effort} reasoning for the current risk route; "
+            "xhigh is accepted only as an explicit capability fallback from max"
         )
     owner_thread = (item.get("task") or {}).get("thread_id")
     latest_plan = _latest_stage_run(item, {"planning"})
     latest_execution = _latest_stage_run(item, {"execution"})
+    if stage == "planning" and status == "completed" and outcome == "ready" and not _contract_ready(item):
+        raise GuardianError("Planning cannot become ready until the requirement/design contract passes review")
     if stage == "execution":
+        if not _contract_ready(item):
+            raise GuardianError("Execution requires a reviewed requirement/design contract")
         if not owner_thread:
             raise GuardianError("Bind the execution task before recording its execution stage")
         if owner_thread != thread_id.strip():
@@ -1209,8 +2119,9 @@ def record_task_stage(
             or latest_plan.get("status") != "completed"
             or latest_plan.get("outcome") != "ready"
             or not _run_matches_current_route(item, latest_plan, "planning")
+            or not _run_matches_contract_revision(item, latest_plan)
         ):
-            raise GuardianError("Execution requires a completed planning outcome of ready from the current risk route")
+            raise GuardianError("Execution requires a current-contract planning outcome of ready from the current risk route")
     if stage in {"review", "final_review"} and owner_thread == thread_id.strip():
         raise GuardianError("Independent review must run in a different Codex task from execution")
     if stage == "review":
@@ -1267,6 +2178,8 @@ def record_task_stage(
                 "host_id": host_id.strip() if host_id else None,
                 "model": model,
                 "reasoning_effort": reasoning_effort,
+                "capability_fallback": capability_fallback,
+                "fallback_reason": fallback_reason.strip() if fallback_reason else None,
                 "expected_model": expected_model,
                 "expected_reasoning_effort": expected_effort,
                 "risk_level": (orchestration.get("risk_assessment") or {}).get("level"),
@@ -1275,6 +2188,7 @@ def record_task_stage(
                 "summary": summary.strip(),
                 "outcome": outcome,
                 "artifact": artifact.strip() if artifact else None,
+                "contract_revision": (mutable.get("contract") or {}).get("revision"),
                 "fingerprint": fingerprint,
                 "updated_at": now,
             }
@@ -1476,6 +2390,24 @@ def _changed_files(worktree: str, base_commit: str) -> list[str]:
     return sorted(values)
 
 
+def _changed_file_statuses(worktree: str, base_commit: str) -> list[dict[str, str]]:
+    rows: dict[str, str] = {}
+    raw = _run_git(worktree, ["diff", "--name-status", "--find-renames", base_commit], check=False)
+    for line in raw.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0]
+        path = parts[-1].strip().replace("\\", "/")
+        if path:
+            rows[path] = status
+    for relative in _run_git(worktree, ["ls-files", "--others", "--exclude-standard"], check=False).splitlines():
+        path = relative.strip().replace("\\", "/")
+        if path:
+            rows[path] = "A"
+    return [{"path": path, "status": rows[path]} for path in sorted(rows)]
+
+
 def _looks_like_test(path: str) -> bool:
     value = path.replace("\\", "/")
     return bool(
@@ -1535,11 +2467,16 @@ def scan_changes(project_root: str, item_id: str) -> dict[str, Any]:
     )
     changed_modules = sorted({file_modules[path] for path in changed if file_modules.get(path)})
     unexpected_modules = sorted(set(changed_modules) - declared_modules) if graph.get("modules") else []
+    change_statuses = _changed_file_statuses(worktree, base_commit)
     scan = {
         "changed_files": changed,
+        "change_statuses": change_statuses,
         "mapped_changes": mapped,
         "orphan_changes": orphan,
         "test_files_changed": [path for path in changed if _looks_like_test(path)],
+        "test_files_deleted": [
+            row["path"] for row in change_statuses if row["status"].startswith("D") and _looks_like_test(row["path"])
+        ],
         "changed_modules": changed_modules,
         "unexpected_impacted_nodes": unexpected_modules,
         "fingerprint": worktree_fingerprint(worktree, base_commit),
@@ -1564,9 +2501,12 @@ def record_evidence(
     summary: str,
     command: str | None = None,
     artifact: str | None = None,
+    _generated: bool = False,
 ) -> dict[str, Any]:
     if kind not in EVIDENCE_KINDS:
         raise GuardianError(f"Unsupported evidence kind: {kind}")
+    if kind == "automated_guard" and not _generated:
+        raise GuardianError("automated_guard evidence must be generated by run_automated_guard")
     project = _load_project(project_root)
     item = _find_item(project, item_id)
     worktree = item.get("worktree_path")
@@ -1601,6 +2541,110 @@ def record_evidence(
     return _mutate_project(project_root, mutate)
 
 
+def _matches_any_path(path: str, patterns: Iterable[str]) -> bool:
+    normalized = path.replace("\\", "/")
+    for pattern in patterns:
+        normalized_pattern = str(pattern).replace("\\", "/")
+        if fnmatch.fnmatch(normalized, normalized_pattern):
+            return True
+        if normalized_pattern.startswith("**/") and fnmatch.fnmatch(normalized, normalized_pattern[3:]):
+            return True
+    return False
+
+
+def run_automated_guard(project_root: str, item_id: str) -> dict[str, Any]:
+    """Run deterministic low-risk scope, drift, and test-integrity checks."""
+    project = _load_project(project_root)
+    item = _find_item(project, item_id)
+    assessment = (item.get("orchestration") or {}).get("risk_assessment") or {}
+    if _orchestration_profile(item) != MODEL_ORCHESTRATION_PROFILE or assessment.get("level") != "low":
+        raise GuardianError("Automated guard is available only for v2 low-risk work items")
+    scan = item.get("last_scan") or {}
+    if not item.get("worktree_path") or not item.get("base_commit"):
+        raise GuardianError("Bind a worktree before running the automated guard")
+    current_fingerprint = worktree_fingerprint(item["worktree_path"], item["base_commit"])
+    protected_paths = project.get("architecture", {}).get("protected_paths", [])
+    protected_patterns = [
+        value.get("path") if isinstance(value, dict) else value
+        for value in protected_paths
+        if value
+    ]
+    changed_files = scan.get("changed_files", [])
+    checks = [
+        {
+            "id": "fresh_scan",
+            "passed": bool(scan) and scan.get("fingerprint") == current_fingerprint,
+            "detail": "变更扫描与当前候选代码指纹一致",
+        },
+        {
+            "id": "non_empty",
+            "passed": bool(changed_files),
+            "detail": "候选版本包含可验证的变更",
+        },
+        {
+            "id": "declared_scope",
+            "passed": not scan.get("orphan_changes"),
+            "detail": "所有修改文件都属于声明范围",
+        },
+        {
+            "id": "declared_impact",
+            "passed": not scan.get("unexpected_impacted_nodes"),
+            "detail": "没有跨入未声明模块",
+        },
+        {
+            "id": "scope_conflicts",
+            "passed": not [entry for entry in item.get("scope_conflicts", []) if not entry.get("serialized")],
+            "detail": "没有未处理的并行范围冲突",
+        },
+        {
+            "id": "test_deletion",
+            "passed": not scan.get("test_files_deleted"),
+            "detail": "没有删除测试文件",
+        },
+        {
+            "id": "protected_paths",
+            "passed": not any(_matches_any_path(path, protected_patterns) for path in changed_files),
+            "detail": "没有修改项目保护路径",
+        },
+        {
+            "id": "sensitive_paths",
+            "passed": not any(_matches_any_path(path, AUTOMATED_GUARD_SENSITIVE_PATHS) for path in changed_files),
+            "detail": "没有触及依赖、迁移、协议、安全或项目结构文件",
+        },
+        {
+            "id": "single_module",
+            "passed": len(scan.get("changed_modules", [])) <= 1,
+            "detail": "修改保持在单一模块内",
+        },
+    ]
+    failed = [check for check in checks if not check["passed"]]
+    success = not failed
+    summary = (
+        "自动门禁通过：范围、模块、保护路径和测试完整性未发现升级信号"
+        if success
+        else "自动门禁需要 AI 复审：" + "；".join(check["detail"] for check in failed)
+    )
+    evidence = record_evidence(
+        project_root,
+        item_id,
+        "automated_guard",
+        success,
+        summary,
+        command="guardian:automated_guard",
+        _generated=True,
+    )
+    return {
+        "item_id": item_id,
+        "success": success,
+        "fingerprint": current_fingerprint,
+        "checks": checks,
+        "failed_checks": [check["id"] for check in failed],
+        "requires_ai_review": not success,
+        "fallback_review": _stage_label(item, "review") if failed else None,
+        "evidence": evidence,
+    }
+
+
 def record_attempt(project_root: str, item_id: str, success: bool, summary: str) -> dict[str, Any]:
     def mutate(project: dict[str, Any]):
         item = _find_item(project, item_id)
@@ -1615,7 +2659,7 @@ def record_attempt(project_root: str, item_id: str, success: bool, summary: str)
             item["consecutive_failures"] = 0
         else:
             item["consecutive_failures"] = int(item.get("consecutive_failures", 0)) + 1
-        if item["consecutive_failures"] >= 3:
+        if item["consecutive_failures"] >= 2:
             item["architecture_review_required"] = True
             item["status"] = "architecture_review"
             if item.get("kind") != "question":
@@ -1630,7 +2674,7 @@ def record_attempt(project_root: str, item_id: str, success: bool, summary: str)
                     "assessed": True,
                     "level": "high",
                     "signals": signals,
-                    "summary": "连续三次失败，已自动升级到高风险架构路线",
+                    "summary": "连续两次失败，已自动升级到高风险 Sol Max 架构路线",
                     "execution_track": "judgment",
                     "source": "automatic_escalation",
                     "assessed_at": utc_now(),
@@ -1689,6 +2733,12 @@ def _documentation_only_scan(scan: dict[str, Any] | None) -> bool:
 
 def _required_evidence_kinds(item: dict[str, Any], scan: dict[str, Any] | None) -> list[str]:
     assessment = (item.get("orchestration") or {}).get("risk_assessment") or {}
+    if _orchestration_profile(item) == MODEL_ORCHESTRATION_PROFILE and assessment.get("level") == "low":
+        guard = _latest_evidence(item, "automated_guard")
+        review_gate = "independent_review" if guard and not guard.get("success") else "automated_guard"
+        if _documentation_only_scan(scan):
+            return ["target", review_gate]
+        return ["target", "related", review_gate, "integration"]
     if assessment.get("level") == "low" and _documentation_only_scan(scan):
         return ["target", "independent_review"]
     return ["target", "related", "full", "independent_review", "integration"]
@@ -1696,7 +2746,7 @@ def _required_evidence_kinds(item: dict[str, Any], scan: dict[str, Any] | None) 
 
 def _orchestration_blockers(item: dict[str, Any], current_fingerprint: str | None) -> list[dict[str, str]]:
     orchestration = item.get("orchestration") or {}
-    if orchestration.get("profile") != MODEL_ORCHESTRATION_PROFILE:
+    if orchestration.get("profile") not in ADAPTIVE_ORCHESTRATION_PROFILES:
         return []
     blockers: list[dict[str, str]] = []
     runs = orchestration.get("runs", [])
@@ -1720,13 +2770,14 @@ def _orchestration_blockers(item: dict[str, Any], current_fingerprint: str | Non
         and run.get("status") == "completed"
         and run.get("outcome") == "ready"
         and run.get("model") == planning_model
-        and run.get("reasoning_effort") == planning_effort
+        and _reasoning_effort_matches(run, planning_effort)
+        and _run_matches_contract_revision(item, run)
     ]
     if not planning:
         blockers.append(
             {
                 "gate": "model_orchestration",
-                "reason": f"No completed {planning_model} {planning_effort} planning stage is recorded for the current risk route",
+                "reason": f"No completed {planning_model} {planning_effort} planning stage is recorded for the current risk route and design-contract revision",
             }
         )
 
@@ -1737,7 +2788,7 @@ def _orchestration_blockers(item: dict[str, Any], current_fingerprint: str | Non
         and run.get("status") == "completed"
         and run.get("outcome") == "implemented"
         and run.get("model") == execution_model
-        and run.get("reasoning_effort") == execution_effort
+        and _reasoning_effort_matches(run, execution_effort)
     ]
     if not executions:
         blockers.append(
@@ -1755,7 +2806,7 @@ def _orchestration_blockers(item: dict[str, Any], current_fingerprint: str | Non
             and run.get("status") == "completed"
             and run.get("outcome") == "implemented"
             and run.get("model") == execution_model
-            and run.get("reasoning_effort") == execution_effort
+            and _reasoning_effort_matches(run, execution_effort)
         )
         or (
             run.get("stage") == "major_fix"
@@ -1764,6 +2815,8 @@ def _orchestration_blockers(item: dict[str, Any], current_fingerprint: str | Non
         )
     ]
     latest_change = max(changes, key=lambda run: run.get("updated_at", ""), default=None)
+    guard = _latest_evidence(item, "automated_guard")
+    review_required = _review_mode(item) != "automated_guard" or bool(guard and not guard.get("success"))
     passing_reviews = [
         run
         for run in runs
@@ -1774,31 +2827,31 @@ def _orchestration_blockers(item: dict[str, Any], current_fingerprint: str | Non
             (
                 run.get("stage") == "review"
                 and run.get("model") == review_model
-                and run.get("reasoning_effort") == review_effort
+                and _reasoning_effort_matches(run, review_effort)
             )
             or (
                 run.get("stage") == "final_review"
-                and run.get("model") == "gpt-5.6-sol"
-                and run.get("reasoning_effort") == "xhigh"
+                and run.get("model") == _major_stage_model(item, "final_review")[0]
+                and _reasoning_effort_matches(run, _major_stage_model(item, "final_review")[1])
             )
         )
     ]
     latest_review = max(passing_reviews, key=lambda run: run.get("updated_at", ""), default=None)
-    if latest_review is None:
+    if review_required and latest_review is None:
         blockers.append(
             {
                 "gate": "model_orchestration",
                 "reason": f"No independent {review_model} {review_effort} passing review is recorded for the current risk route",
             }
         )
-    elif latest_change and latest_review.get("updated_at", "") < latest_change.get("updated_at", ""):
+    elif review_required and latest_change and latest_review.get("updated_at", "") < latest_change.get("updated_at", ""):
         blockers.append(
             {
                 "gate": "model_orchestration",
                 "reason": "The passing independent review predates the latest implementation or major fix",
             }
         )
-    elif current_fingerprint and latest_review.get("fingerprint") != current_fingerprint:
+    elif review_required and current_fingerprint and latest_review.get("fingerprint") != current_fingerprint:
         blockers.append(
             {
                 "gate": "model_orchestration",
@@ -1818,6 +2871,8 @@ def check_merge_readiness(project_root: str, item_id: str) -> dict[str, Any]:
     if item["kind"] == "question":
         blockers.append({"gate": "change_goal", "reason": "Diagnosis-only items are not merge candidates"})
     contract = item.get("contract", {})
+    if not _contract_ready(item):
+        blockers.append({"gate": "design_contract", "reason": "Requirement/design contract is not reviewed and ready"})
     for key in ("original_request", "goal", "acceptance_criteria", "non_goals", "protected_behaviors"):
         if not contract.get(key):
             blockers.append({"gate": "contract", "reason": f"Missing contract field: {key}"})
@@ -1967,7 +3022,11 @@ def _mindmap_label(item: dict[str, Any]) -> str:
     title = re.sub(r"[\r\n]+", " ", item["title"]).replace('"', "'")
     assessment = (item.get("orchestration") or {}).get("risk_assessment") or {}
     risk = RISK_LEVEL_LABELS.get(assessment.get("level"), "待判风险") if item.get("kind") != "question" else "只读诊断"
-    return f"{title} - {item['status']} - {risk}"
+    phase = CONTRACT_PHASE_LABELS.get(
+        (item.get("contract") or {}).get("phase", "ready"),
+        (item.get("contract") or {}).get("phase", "ready"),
+    )
+    return f"{title} - {phase} - {item['status']} - {risk}"
 
 
 def _mindmap_text(value: Any) -> str:
@@ -2046,6 +3105,7 @@ def get_project_map(project_root: str) -> dict[str, Any]:
                 "task": item.get("task"),
                 "orchestration": item.get("orchestration"),
                 "risk_route": _risk_route_view(item),
+                "design_contract": _design_contract_view(item),
                 "changed_files": len(last_scan.get("changed_files", [])),
                 "orphan_changes": len(last_scan.get("orphan_changes", [])),
                 "architecture_review_required": item.get("architecture_review_required", False),
@@ -2168,6 +3228,7 @@ def get_project_dashboard(project_root: str) -> dict[str, Any]:
     item_rows = []
     for item in project.get("work_items", []):
         last_scan = item.get("last_scan") or {}
+        contract_view = _design_contract_view(item)
         item_rows.append(
             {
                 "id": item.get("id"),
@@ -2180,6 +3241,22 @@ def get_project_dashboard(project_root: str) -> dict[str, Any]:
                 "thread_id": (item.get("task") or {}).get("thread_id"),
                 "orchestration": item.get("orchestration"),
                 "risk_route": _risk_route_view(item),
+                "design_contract": {
+                    key: contract_view.get(key)
+                    for key in (
+                        "phase",
+                        "phase_label",
+                        "revision",
+                        "requirements_complete",
+                        "missing_dimensions",
+                        "open_question",
+                        "open_decision",
+                        "recommendation",
+                        "selected_approach",
+                        "review",
+                        "artifact_uri",
+                    )
+                },
                 "changed_files": len(last_scan.get("changed_files", [])),
                 "orphan_changes": len(last_scan.get("orphan_changes", [])),
                 "scope_conflicts": len(item.get("scope_conflicts", [])),
@@ -2188,7 +3265,7 @@ def get_project_dashboard(project_root: str) -> dict[str, Any]:
         )
 
     return {
-        "dashboard_version": 3,
+        "dashboard_version": 5,
         "project": {
             "id": project["project_id"],
             "name": project["name"],
@@ -2217,6 +3294,12 @@ def get_project_dashboard(project_root: str) -> dict[str, Any]:
             "waiting_for_merge_confirmation": sum(
                 1 for item in project.get("work_items", []) if item.get("status") == "ready_for_user_confirmation"
             ),
+            "discovering_requirements": sum(
+                1 for item in project.get("work_items", []) if item.get("status") == "discovering_requirements"
+            ),
+            "waiting_for_product_decision": sum(
+                1 for item in project.get("work_items", []) if item.get("status") == "needs_user_decision"
+            ),
             "high_risk_items": sum(
                 1
                 for item in project.get("work_items", [])
@@ -2227,20 +3310,248 @@ def get_project_dashboard(project_root: str) -> dict[str, Any]:
             "profile": project.get("settings", {}).get("model_orchestration_profile"),
             "automatic": True,
             "user_selects_model": False,
+            "luna_default_reasoning_effort": "max",
+            "max_fallback_reasoning_effort": "xhigh",
+            "high_risk_planning_model": "gpt-5.6-sol",
+            "high_risk_planning_effort": "max",
             "major_bug_model": "gpt-5.6-sol",
-            "major_bug_reasoning_effort": "xhigh",
+            "major_bug_reasoning_effort": "max",
+            "low_risk_review_mode": "automated_guard_with_ai_fallback",
         },
         "next_step": guidance,
         "how_to_use": [
-            {"step": 1, "title": "打开项目图", "detail": "在项目的 Codex 任务里输入“打开项目图”。"},
-            {"step": 2, "title": "正常说需求", "detail": "直接说要增加什么功能，或哪里表现不对，不需要先懂 Git。"},
-            {"step": 3, "title": "跟着唯一下一步", "detail": "Guardian 自动选择任务、工作树和代码范围；只有合并前需要你确认。"},
+            {"step": 1, "title": "自动看到项目状态", "detail": "Guardian 每轮结束都会在回复底部显示迷你项目图。"},
+            {"step": 2, "title": "正常说需求", "detail": "直接说新项目、功能或哪里表现不对；Guardian 自动识别类型。"},
+            {"step": 3, "title": "先问清再开发", "detail": "新项目和功能先进入需求访谈；只有真实产品取舍才需要你决定。"},
+            {"step": 4, "title": "需要时展开", "detail": "点击“展开完整项目图”查看设计合同、分支、模块、函数和开发任务。"},
         ],
         "sections": {
+            "requirements": [
+                {
+                    "item_id": row["id"],
+                    "title": row["title"],
+                    "status": row["status"],
+                    "status_label": row["status_label"],
+                    **row["design_contract"],
+                }
+                for row in item_rows
+            ],
             "branches": branch_rows,
             "modules": module_rows,
             "items": item_rows,
         },
+    }
+
+
+def get_verification_plan(project_root: str, item_id: str) -> dict[str, Any]:
+    """Return a compact, fingerprint-aware gate plan so unchanged evidence can be reused."""
+    project = _load_project(project_root)
+    item = _find_item(project, item_id)
+    scan = item.get("last_scan")
+    fingerprint = None
+    if item.get("worktree_path") and item.get("base_commit"):
+        fingerprint = worktree_fingerprint(item["worktree_path"], item["base_commit"])
+    required = ["baseline", *_required_evidence_kinds(item, scan)]
+    if scan and scan.get("test_files_changed"):
+        required.append("test_integrity_review")
+    if item.get("architecture_review_required"):
+        required.append("architecture")
+    required = list(dict.fromkeys(required))
+    gates = []
+    reusable = []
+    pending = []
+    for kind in required:
+        evidence = _latest_evidence(item, kind)
+        if not evidence:
+            status = "missing"
+        elif not evidence.get("success"):
+            status = "failed"
+        elif kind == "baseline" or not fingerprint or evidence.get("fingerprint") == fingerprint:
+            status = "reusable"
+            reusable.append(kind)
+        else:
+            status = "stale"
+        if status != "reusable":
+            pending.append(kind)
+        gates.append(
+            {
+                "kind": kind,
+                "status": status,
+                "evidence_id": evidence.get("id") if evidence else None,
+                "summary": evidence.get("summary") if evidence else None,
+            }
+        )
+    canonical = (project.get("onboarding") or {}).get("canonical_base") or {}
+    target_ref = canonical.get("ref")
+    target_head = _run_git(project["root"], ["rev-parse", "--verify", target_ref], check=False) if target_ref else None
+    model_review = [kind for kind in pending if kind == "independent_review"]
+    automated = [kind for kind in pending if kind in {"automated_guard", "test_integrity_review"}]
+    tests = [kind for kind in pending if kind not in set(model_review + automated + ["architecture"])]
+    return {
+        "item_id": item_id,
+        "candidate": {
+            "fingerprint": fingerprint,
+            "scan_fingerprint": (scan or {}).get("fingerprint"),
+            "scan_is_current": bool(fingerprint and scan and scan.get("fingerprint") == fingerprint),
+            "target_ref": target_ref,
+            "target_head": target_head or None,
+        },
+        "review_mode": _review_mode(item),
+        "gates": gates,
+        "reusable_evidence": reusable,
+        "pending_evidence": pending,
+        "parallel_groups": {
+            "tests": tests,
+            "automated": automated,
+            "independent_review": model_review,
+            "architecture": [kind for kind in pending if kind == "architecture"],
+        },
+        "instruction": "复用同一候选指纹下已通过的证据；其余测试、自动门禁和独立复审可并行执行。",
+    }
+
+
+def get_work_context(project_root: str, item_id: str) -> dict[str, Any]:
+    """Return the bounded context capsule used for task handoff instead of replaying a whole conversation."""
+    item = get_work_item(project_root, item_id)
+    runs = (item.get("orchestration") or {}).get("runs", [])
+    latest_runs: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        latest_runs[run.get("stage", "unknown")] = {
+            key: run.get(key)
+            for key in (
+                "id",
+                "stage",
+                "thread_id",
+                "model",
+                "reasoning_effort",
+                "capability_fallback",
+                "status",
+                "outcome",
+                "summary",
+                "artifact",
+                "contract_revision",
+                "fingerprint",
+                "updated_at",
+            )
+        }
+    scan = item.get("last_scan") or {}
+    return {
+        "context_version": 2,
+        "item_id": item_id,
+        "title": item.get("title"),
+        "kind": item.get("kind"),
+        "status": item.get("status"),
+        "contract": item.get("contract"),
+        "design_contract": {
+            key: _design_contract_view(item).get(key)
+            for key in (
+                "phase",
+                "phase_label",
+                "revision",
+                "requirements_complete",
+                "missing_dimensions",
+                "recommendation",
+                "selected_approach",
+                "review",
+                "artifact_uri",
+            )
+        },
+        "scope": item.get("scope"),
+        "task": item.get("task"),
+        "branch": item.get("branch"),
+        "worktree_path": item.get("worktree_path"),
+        "risk_route": _risk_route_view(item),
+        "latest_stage_runs": list(latest_runs.values()),
+        "change_summary": {
+            "changed_files": scan.get("changed_files", []),
+            "orphan_changes": scan.get("orphan_changes", []),
+            "changed_modules": scan.get("changed_modules", []),
+            "unexpected_impacted_nodes": scan.get("unexpected_impacted_nodes", []),
+            "fingerprint": scan.get("fingerprint"),
+        },
+        "verification": get_verification_plan(project_root, item_id),
+        "attempts": {
+            "consecutive_failures": item.get("consecutive_failures", 0),
+            "latest": (item.get("attempt_log") or [])[-1:] or [],
+        },
+        "context_policy": "只加载该胶囊、精确相关模块和符号；不要重放完整历史会话或完整项目图。",
+    }
+
+
+def get_project_closeout(project_root: str) -> dict[str, Any]:
+    """Return the compact project map that should be rendered automatically at the end of each Guardian turn."""
+    project = _load_project(project_root)
+    onboarding = _refresh_onboarding(project)
+    guidance = _project_guidance(project)
+    active = [item for item in project.get("work_items", []) if item.get("status") in ACTIVE_STATUSES]
+    primary_item = active[0] if active else None
+    state_material = {
+        "updated_at": project.get("updated_at"),
+        "onboarding": onboarding.get("status"),
+        "items": [(item.get("id"), item.get("status"), item.get("updated_at")) for item in active],
+    }
+    state_version = hashlib.sha256(
+        json.dumps(state_material, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    compact_items = []
+    for item in active[:8]:
+        route = _risk_route_view(item)
+        runs = (item.get("orchestration") or {}).get("runs", [])
+        latest = runs[-1] if runs else None
+        compact_items.append(
+            {
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "status": item.get("status"),
+                "status_label": WORK_ITEM_STATUS_LABELS.get(item.get("status"), item.get("status")),
+                "risk": route.get("level_label"),
+                "current_stage": (
+                    _run_stage_label(latest)
+                    if latest
+                    else (route.get("stages") or [{}])[0].get("label")
+                ),
+                "branch": item.get("branch"),
+                "thread_id": (item.get("task") or {}).get("thread_id"),
+                "merge_ready": bool((item.get("merge_readiness") or {}).get("ready")),
+                "contract_phase": (item.get("contract") or {}).get("phase", "ready"),
+                "contract_phase_label": CONTRACT_PHASE_LABELS.get(
+                    (item.get("contract") or {}).get("phase", "ready"),
+                    (item.get("contract") or {}).get("phase", "ready"),
+                ),
+                "open_question": (item.get("contract") or {}).get("open_question"),
+                "open_decision": (item.get("contract") or {}).get("open_decision"),
+                "design_artifact_uri": f"guardian://work-items/{item.get('id')}/design-contract",
+            }
+        )
+    expand_action = _follow_up_action(
+        "expand-project-map",
+        "展开完整项目图",
+        f"使用 Project Guardian 打开项目 {project['root']} 的完整项目图，显示开发任务、分支与工作树、功能模块和使用说明。",
+        "按需展开完整资料；日常回复只显示迷你项目图以节省上下文。",
+    )
+    return {
+        "closeout_version": 2,
+        "state_version": state_version,
+        "auto_render": True,
+        "render_position": "reply_end",
+        "project": {"id": project["project_id"], "name": project["name"], "root": project["root"]},
+        "state": {
+            "status": onboarding.get("status"),
+            "status_label": guidance.get("status_label"),
+            "summary": guidance.get("summary"),
+        },
+        "active_item": compact_items[0] if compact_items else None,
+        "mini_map": compact_items,
+        "alerts": {
+            "blocked": sum(1 for item in active if item.get("status") == "blocked"),
+            "drift": sum(1 for item in active if (item.get("last_scan") or {}).get("orphan_changes")),
+            "waiting_for_merge": sum(1 for item in active if item.get("status") == "ready_for_user_confirmation"),
+            "needs_user_decision": sum(1 for item in active if item.get("status") == "needs_user_decision"),
+        },
+        "primary_action": guidance.get("primary_action"),
+        "expand_action": expand_action,
+        "reopen": guidance.get("reopen"),
+        "display_policy": "每轮自动显示迷你项目图；首次接入、风险升级、复审失败或等待合并时自动展开完整图。",
     }
 
 

@@ -9,8 +9,8 @@ import project_guardian_core as guardian
 
 
 SERVER_NAME = "project-guardian"
-SERVER_VERSION = "0.3.0"
-SERVER_INSTRUCTIONS = "Use Project Guardian tools before editing registered projects. Automatically assess each change item's risk; never ask the user to choose a model. Use Terra medium / Luna high / Terra medium for low risk, Terra high / Luna xhigh / Terra high for standard risk, and Sol xhigh planning plus Luna xhigh or Terra xhigh execution plus Sol xhigh review for high risk. Route major bugs to a separate Sol xhigh fixer followed by a fresh Sol xhigh review. Record every stage. After every project operation, visibly tell the user the current state, one primary next action, and that typing '打开项目图' reopens the dashboard. Never merge automatically."
+SERVER_VERSION = "0.5.0"
+SERVER_INSTRUCTIONS = "Use Project Guardian before editing registered projects. Automatically route new projects and feature ideas into requirement discovery: inspect known project facts first, ask only one consequential question at a time, compare meaningful approaches without defaulting to an MVP, recommend the best fit, and ask the user only when a material trade-off or low confidence remains. Persist one reviewed requirement/design contract before planning can become ready or a worktree can bind. Route models automatically; every Luna stage uses max by default with an explicit xhigh capability fallback only when max is unavailable. Use Sol max for high-risk planning and major-bug repair, then fresh Sol xhigh for high-risk review. Reuse compact context and fingerprint evidence. Before every final reply, call get_project_closeout and render its compact project map. Never merge automatically."
 
 
 def _configure_stdio() -> None:
@@ -36,6 +36,65 @@ def _schema(properties: dict[str, Any], required: list[str] | None = None) -> di
 
 
 STRING_LIST = {"type": "array", "items": {"type": "string"}}
+CONTRACT_UPDATES = _schema(
+    {
+        "problem_statement": {"type": "string"},
+        "goal": {"type": "string"},
+        "stakeholders": STRING_LIST,
+        "user_scenarios": STRING_LIST,
+        "current_state": {"type": "string"},
+        "functional_requirements": STRING_LIST,
+        "quality_requirements": STRING_LIST,
+        "constraints": STRING_LIST,
+        "preferences": STRING_LIST,
+        "assumptions": STRING_LIST,
+        "acceptance_criteria": STRING_LIST,
+        "non_goals": STRING_LIST,
+        "protected_behaviors": STRING_LIST,
+    }
+)
+QUESTION_OPTION = _schema(
+    {
+        "id": {"type": "string"},
+        "label": {"type": "string"},
+        "description": {"type": "string"},
+        "recommended": {"type": "boolean"},
+    },
+    ["id", "label", "description"],
+)
+REQUIREMENT_QUESTION = _schema(
+    {
+        "dimension": {"type": "string"},
+        "prompt": {"type": "string"},
+        "reason": {"type": "string"},
+        "options": {"type": "array", "items": QUESTION_OPTION},
+    },
+    ["dimension", "prompt", "reason"],
+)
+SOLUTION_APPROACH = _schema(
+    {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "summary": {"type": "string"},
+        "fit_score": {"type": "integer", "minimum": 0, "maximum": 10},
+        "effort": {"type": "string"},
+        "risk": {"type": "string"},
+        "pros": STRING_LIST,
+        "cons": STRING_LIST,
+        "reuses": STRING_LIST,
+    },
+    ["id", "name", "summary", "fit_score", "effort", "risk", "pros", "cons"],
+)
+DESIGN_REVIEW_SCORES = _schema(
+    {
+        "completeness": {"type": "integer", "minimum": 0, "maximum": 10},
+        "consistency": {"type": "integer", "minimum": 0, "maximum": 10},
+        "clarity": {"type": "integer", "minimum": 0, "maximum": 10},
+        "scope": {"type": "integer", "minimum": 0, "maximum": 10},
+        "feasibility": {"type": "integer", "minimum": 0, "maximum": 10},
+    },
+    ["completeness", "consistency", "clarity", "scope", "feasibility"],
+)
 
 
 TOOLS = [
@@ -116,6 +175,12 @@ TOOLS = [
         "annotations": {"readOnlyHint": True},
     },
     {
+        "name": "get_project_closeout",
+        "description": "Return the compact project map that must be rendered automatically at the end of every Guardian-managed reply. It contains current state, one action, active work, alerts, and an expand-full-map action without the full inventory.",
+        "inputSchema": _schema({"project_root": {"type": "string"}}, ["project_root"]),
+        "annotations": {"readOnlyHint": True},
+    },
+    {
         "name": "get_module_map",
         "description": "Read one persisted module's files, dependencies, functions, methods, signatures, and parameters without loading the whole code graph.",
         "inputSchema": _schema(
@@ -156,8 +221,155 @@ TOOLS = [
         "annotations": {"readOnlyHint": True},
     },
     {
+        "name": "get_design_contract",
+        "description": "Return the single versioned requirement/design contract and its Markdown view: original request, clarified facts, open question, approaches, recommendation, user decisions, acceptance criteria, and document review. Prefer this over replaying the discovery conversation.",
+        "inputSchema": _schema(
+            {"project_root": {"type": "string"}, "item_id": {"type": "string"}},
+            ["project_root", "item_id"],
+        ),
+        "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "start_requirement_discovery",
+        "description": "Start read-only requirement discovery for a new project, feature, refactor, architecture change, maintenance request, or defect before creating an execution worktree. Automatically choose kind and profile from the request; the user never selects workflow metadata.",
+        "inputSchema": _schema(
+            {
+                "project_root": {"type": "string"},
+                "title": {"type": "string"},
+                "original_request": {"type": "string"},
+                "kind": {"type": "string", "enum": sorted(guardian.WORK_ITEM_KINDS - {"question"})},
+                "profile": {"type": "string", "enum": sorted(guardian.REQUIREMENT_PROFILES)},
+                "parent_id": {"type": "string"},
+            },
+            ["project_root", "title", "original_request", "kind", "profile"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "update_requirement_discovery",
+        "description": "Persist clarified requirement facts and optionally resolve the current question or register exactly one next consequential question. Inspect code and prior decisions first; never ask for technical facts Guardian can discover. If the user says they do not know, research or reason first, recommend concrete options, then ask only when the product trade-off remains material.",
+        "inputSchema": _schema(
+            {
+                "project_root": {"type": "string"},
+                "item_id": {"type": "string"},
+                "updates": CONTRACT_UPDATES,
+                "resolved_question_id": {"type": "string"},
+                "answer": {"type": "string"},
+                "next_question": REQUIREMENT_QUESTION,
+            },
+            ["project_root", "item_id"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "finalize_requirement_discovery",
+        "description": "Validate that the adaptive requirement profile is complete and transition from questioning to solution comparison. This does not choose an MVP or start implementation.",
+        "inputSchema": _schema(
+            {
+                "project_root": {"type": "string"},
+                "item_id": {"type": "string"},
+                "clarified_summary": {"type": "string"},
+            },
+            ["project_root", "item_id", "clarified_summary"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "record_solution_design",
+        "description": "Compare requirement-driven solution approaches and persist the best recommendation. Minimal, complete, phased, reuse-first, or replacement designs are all candidates, never defaults. Auto-select a clear high-confidence winner; when a material trade-off or low confidence remains, persist one beginner-facing user decision and stop.",
+        "inputSchema": _schema(
+            {
+                "project_root": {"type": "string"},
+                "item_id": {"type": "string"},
+                "complexity": {"type": "string", "enum": ["simple", "nontrivial"]},
+                "approaches": {"type": "array", "items": SOLUTION_APPROACH},
+                "recommendation_id": {"type": "string"},
+                "recommendation_reason": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "decision_signals": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": sorted(guardian.DECISION_SIGNALS)},
+                },
+                "decision_question": {"type": "string"},
+            },
+            [
+                "project_root",
+                "item_id",
+                "complexity",
+                "approaches",
+                "recommendation_id",
+                "recommendation_reason",
+                "confidence",
+            ],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "record_solution_decision",
+        "description": "Record the user's answer to the single open solution decision, even when it differs from Guardian's recommendation, then move the chosen approach into document review.",
+        "inputSchema": _schema(
+            {
+                "project_root": {"type": "string"},
+                "item_id": {"type": "string"},
+                "decision_id": {"type": "string"},
+                "selected_option_id": {"type": "string"},
+                "answer": {"type": "string"},
+            },
+            ["project_root", "item_id", "decision_id", "selected_option_id", "answer"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "review_design_contract",
+        "description": "Record a cold document review across completeness, consistency, clarity, scope, and feasibility. A passing reviewed contract becomes the only executable source of truth; revision findings return it to solution design and no worktree may bind yet.",
+        "inputSchema": _schema(
+            {
+                "project_root": {"type": "string"},
+                "item_id": {"type": "string"},
+                "reviewer_thread_id": {"type": "string"},
+                "scores": DESIGN_REVIEW_SCORES,
+                "outcome": {"type": "string", "enum": ["passed", "needs_revision"]},
+                "summary": {"type": "string"},
+                "findings": STRING_LIST,
+            },
+            ["project_root", "item_id", "reviewer_thread_id", "scores", "outcome", "summary"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "reopen_design_contract",
+        "description": "Reopen a previously reviewed adaptive contract when implementation evidence contradicts its selected design. Preserve revision lineage, invalidate the old review and planning revision, and return to solution design instead of silently changing product intent.",
+        "inputSchema": _schema(
+            {
+                "project_root": {"type": "string"},
+                "item_id": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            ["project_root", "item_id", "reason"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "get_work_context",
+        "description": "Return a compact work-item context capsule with contract, scope, current route, latest stage per role, current diff summary, reusable evidence, and only the latest attempt. Prefer this over replaying a whole conversation or loading all evidence history.",
+        "inputSchema": _schema(
+            {"project_root": {"type": "string"}, "item_id": {"type": "string"}},
+            ["project_root", "item_id"],
+        ),
+        "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "get_verification_plan",
+        "description": "Return fingerprint-aware verification gates, reusable evidence, pending evidence, and parallel test/review groups for one candidate without changing its state.",
+        "inputSchema": _schema(
+            {"project_root": {"type": "string"}, "item_id": {"type": "string"}},
+            ["project_root", "item_id"],
+        ),
+        "annotations": {"readOnlyHint": True},
+    },
+    {
         "name": "create_work_item",
-        "description": "Create a project-graph node with an immutable user request and explicit acceptance, non-goal, and protected-behavior contract.",
+        "description": "Create an already-clarified compatibility work item with an immutable request and explicit acceptance, non-goal, and protected-behavior contract. For ordinary new projects or features, prefer start_requirement_discovery so Guardian asks before planning.",
         "inputSchema": _schema(
             {
                 "project_root": {"type": "string"},
@@ -218,7 +430,7 @@ TOOLS = [
     },
     {
         "name": "record_task_stage",
-        "description": "Persist one adaptive model-orchestration stage. Enforces the exact model and reasoning selected by the automatic risk route, independent review tasks, and Sol xhigh major-fix/final-review separation.",
+        "description": "Persist one adaptive model-orchestration stage. Enforces Luna max by default, explicit max-to-xhigh capability fallback, independent review tasks, and Sol max fixer / Sol xhigh final-review separation.",
         "inputSchema": _schema(
             {
                 "project_root": {"type": "string"},
@@ -232,6 +444,10 @@ TOOLS = [
                 "outcome": {"type": "string"},
                 "artifact": {"type": "string"},
                 "host_id": {"type": "string"},
+                "fallback_reason": {
+                    "type": "string",
+                    "description": "Required only when the requested max effort is unavailable and the stage explicitly falls back to xhigh.",
+                },
             },
             [
                 "project_root",
@@ -296,7 +512,7 @@ TOOLS = [
     },
     {
         "name": "record_evidence",
-        "description": "Record baseline, target, related, full, review, integration, test-integrity, or architecture evidence bound to the current worktree fingerprint.",
+        "description": "Record baseline, target, related, full, review, integration, test-integrity, or architecture evidence bound to the current worktree fingerprint. automated_guard evidence can only be generated by run_automated_guard.",
         "inputSchema": _schema(
             {
                 "project_root": {"type": "string"},
@@ -312,8 +528,17 @@ TOOLS = [
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
     },
     {
+        "name": "run_automated_guard",
+        "description": "Run deterministic scope, drift, protected-path, sensitive-file, module-boundary, and test-deletion checks for a v2 low-risk candidate. A failure routes the item to a focused AI review instead of pretending the gate passed.",
+        "inputSchema": _schema(
+            {"project_root": {"type": "string"}, "item_id": {"type": "string"}},
+            ["project_root", "item_id"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+    },
+    {
         "name": "record_attempt",
-        "description": "Record an implementation attempt. Three consecutive failures automatically escalate the item to the high-risk architecture route.",
+        "description": "Record an implementation attempt. Two consecutive failures automatically escalate the item to the high-risk Sol Max architecture route.",
         "inputSchema": _schema(
             {
                 "project_root": {"type": "string"},
@@ -364,10 +589,21 @@ HANDLERS: dict[str, Callable[..., Any]] = {
     "record_project_validation": guardian.record_project_validation,
     "get_project_map": guardian.get_project_map,
     "get_project_dashboard": guardian.get_project_dashboard,
+    "get_project_closeout": guardian.get_project_closeout,
     "get_branch_map": guardian.get_branch_map,
     "get_module_map": guardian.get_module_map,
     "search_code_graph": guardian.search_code_graph,
     "get_work_item": guardian.get_work_item,
+    "get_design_contract": guardian.get_design_contract,
+    "start_requirement_discovery": guardian.start_requirement_discovery,
+    "update_requirement_discovery": guardian.update_requirement_discovery,
+    "finalize_requirement_discovery": guardian.finalize_requirement_discovery,
+    "record_solution_design": guardian.record_solution_design,
+    "record_solution_decision": guardian.record_solution_decision,
+    "review_design_contract": guardian.review_design_contract,
+    "reopen_design_contract": guardian.reopen_design_contract,
+    "get_work_context": guardian.get_work_context,
+    "get_verification_plan": guardian.get_verification_plan,
     "create_work_item": guardian.create_work_item,
     "bind_work_item": guardian.bind_work_item,
     "assess_work_item_risk": guardian.assess_work_item_risk,
@@ -376,6 +612,7 @@ HANDLERS: dict[str, Callable[..., Any]] = {
     "set_change_scope": guardian.set_change_scope,
     "scan_changes": guardian.scan_changes,
     "record_evidence": guardian.record_evidence,
+    "run_automated_guard": guardian.run_automated_guard,
     "record_attempt": guardian.record_attempt,
     "check_merge_readiness": guardian.check_merge_readiness,
     "complete_work_item": guardian.complete_work_item,
@@ -406,18 +643,19 @@ def _tool_result(request_id: Any, value: Any, is_error: bool = False) -> None:
 def _attach_guidance(name: str, arguments: dict[str, Any], value: Any) -> Any:
     """Make every successful project operation end with a deterministic user-facing next step."""
     project_root = arguments.get("project_root")
-    if not project_root or not isinstance(value, dict) or name == "get_project_dashboard":
+    if not project_root or not isinstance(value, dict) or name in {"get_project_dashboard", "get_project_closeout"}:
         return value
     try:
-        dashboard = guardian.get_project_dashboard(project_root)
+        closeout = guardian.get_project_closeout(project_root)
     except guardian.GuardianError:
         return value
     enriched = dict(value)
+    enriched["guardian_closeout"] = closeout
     enriched["guardian_guidance"] = {
-        "status_label": dashboard["state"]["status_label"],
-        "summary": dashboard["state"]["summary"],
-        "primary_action": dashboard["next_step"]["primary_action"],
-        "reopen": dashboard["next_step"]["reopen"],
+        "status_label": closeout["state"]["status_label"],
+        "summary": closeout["state"]["summary"],
+        "primary_action": closeout["primary_action"],
+        "reopen": closeout["reopen"],
     }
     return enriched
 
