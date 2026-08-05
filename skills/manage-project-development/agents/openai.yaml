@@ -1,13 +1,13 @@
 interface:
   display_name: "项目开发守护"
-  short_description: "自动分级风险并调度 Terra、Luna、Sol 的开发守护"
-  default_prompt: "Use $manage-project-development to open this project's interactive map, tell me the single next step in beginner-friendly language, automatically assess each change's risk, and enforce the exact persisted Terra/Luna/Sol route until merge confirmation."
+  short_description: "先问清需求并选择最优方案，再安全管理开发与合并"
+  default_prompt: "Use $manage-project-development to clarify this request, persist one reviewed design contract, choose the best-fit solution, and manage implementation through the compact project map until merge confirmation."
 
 dependencies:
   tools:
     - type: "mcp"
       value: "project-guardian"
-      description: "Persistent onboarding, adaptive risk/model stages, code graph, Codex task/worktree bindings, scope conflicts, evidence, and merge-readiness tools"
+      description: "Persistent requirement discovery, design contracts, adaptive risk/model stages, code graph, Codex task/worktree bindings, scope conflicts, evidence, and merge-readiness tools"
       transport: "stdio"
 
 policy:

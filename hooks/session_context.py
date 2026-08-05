@@ -30,8 +30,9 @@ def main() -> int:
         message = (
             f"Project Guardian manages '{project['name']}'. This is its local checkout. "
             "Do not edit here. Run guardian_health, read get_project_map, and complete onboarding gates first. "
-            "For a change, automatically assess risk and enforce the exact persisted Terra/Luna/Sol route in one bound worktree. "
-            "Before ending any Guardian response, call get_project_dashboard and visibly show one next action plus the reopen phrase '打开项目图'."
+            "For a new project or feature, start requirement discovery, ask one consequential question at a time, compare best-fit solutions, "
+            "and pass the single design-contract review before creating an execution worktree. Then automatically assess risk and enforce the exact persisted Terra/Luna/Sol route. "
+            "Before every final reply, call get_project_closeout and render its compact project map automatically at the reply end."
         )
     elif context["mode"] == "unbound_worktree":
         message = (
@@ -39,31 +40,29 @@ def main() -> int:
             f"Do not edit until a work item is created and bind_work_item records thread_id '{session_id}' "
             f"with worktree_path '{context['worktree_path']}'. Do not create a second worktree. "
             "This worktree may be edited only by the assigned risk-authorized executor or a recorded Sol major-fix stage. "
-            "Before ending any Guardian response, call get_project_dashboard and visibly show one next action plus the reopen phrase '打开项目图'."
+            "Before every final reply, call get_project_closeout and render its compact project map automatically at the reply end."
         )
     else:
         item = context["item"]
         contract = item.get("contract", {})
+        contract_phase = guardian.CONTRACT_PHASE_LABELS.get(contract.get("phase", "ready"), contract.get("phase", "ready"))
         allowed = ", ".join(entry["path"] for entry in item.get("scope", {}).get("allowed_changes", [])) or "not declared"
         orchestration = item.get("orchestration") or {}
         runs = orchestration.get("runs", [])
         risk_route = guardian._risk_route_view(item)
         if runs:
             latest = runs[-1]
-            latest_stage = (
-                f"{guardian.MODEL_LABELS.get(latest.get('model'), latest.get('model'))} · "
-                f"{str(latest.get('reasoning_effort') or '').capitalize()} "
-                f"{guardian.STAGE_ROLE_LABELS.get(latest.get('stage'), latest.get('stage'))}"
-            )
+            latest_stage = guardian._run_stage_label(latest)
         else:
             latest_stage = "待自动判断风险" if not risk_route["assessed"] else risk_route["stages"][0]["label"]
         message = (
             f"Project Guardian work item {item['id']}: {item['title']}. "
             f"Goal: {contract.get('goal', 'missing')}. Status: {item.get('status')}. "
+            f"Requirement/design phase: {contract_phase}; contract artifact: guardian://work-items/{item['id']}/design-contract. "
             f"Risk route: {risk_route['level_label']}. Current model stage: {latest_stage}. "
             f"Allowed change paths: {allowed}. Preserve the original request and use scan_changes plus evidence gates before completion. "
             f"Owning Codex task: {(item.get('task') or {}).get('thread_id') or session_id}. Never merge automatically. "
-            "Before ending any Guardian response, call get_project_dashboard and visibly show one next action plus the reopen phrase '打开项目图'."
+            "Before every final reply, call get_project_closeout and render its compact project map automatically at the reply end."
         )
     output = {
         "hookSpecificOutput": {

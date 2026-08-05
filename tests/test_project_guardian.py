@@ -120,7 +120,7 @@ class GuardianWorkflowTests(unittest.TestCase):
             stage="execution",
             thread_id=executor_thread,
             model="gpt-5.6-luna",
-            reasoning_effort="xhigh",
+            reasoning_effort="max",
             status="running",
             summary="Standard-route Luna implementation started",
         )
@@ -132,6 +132,36 @@ class GuardianWorkflowTests(unittest.TestCase):
         )
         return item, worktree
 
+    def create_discovered_feature(self, title: str = "Batch price updates") -> dict:
+        self.onboard()
+        started = guardian.start_requirement_discovery(
+            str(self.repo),
+            title=title,
+            original_request="Add a batch operation after asking what users really need",
+            kind="feature",
+            profile="product",
+        )
+        updated = guardian.update_requirement_discovery(
+            str(self.repo),
+            started["item_id"],
+            updates={
+                "problem_statement": "Operators waste time repeating one safe change across many records",
+                "goal": "Complete the batch operation with clear failures and no hidden partial state",
+                "stakeholders": ["Store operator", "Head-office administrator"],
+                "user_scenarios": ["Select many records, preview the result, apply valid changes, inspect failures"],
+                "current_state": "The existing project supports the same operation one record at a time",
+                "functional_requirements": ["Support a batch preview", "Report every rejected record"],
+                "constraints": ["Reuse current permissions and audit history"],
+                "acceptance_criteria": ["Valid records change and rejected records show a specific reason"],
+                "non_goals": ["Do not add scheduling"],
+                "protected_behaviors": ["The existing single-record operation remains compatible"],
+            },
+        )
+        self.assertTrue(updated["requirements_complete"])
+        return guardian.finalize_requirement_discovery(
+            str(self.repo), started["item_id"], "A reviewed batch operation built on existing behavior"
+        )
+
     def complete_standard_model_pipeline(self, item: dict) -> None:
         stored = guardian.get_work_item(str(self.repo), item["id"])
         executor_thread = stored["task"]["thread_id"]
@@ -141,7 +171,7 @@ class GuardianWorkflowTests(unittest.TestCase):
             stage="execution",
             thread_id=executor_thread,
             model="gpt-5.6-luna",
-            reasoning_effort="xhigh",
+            reasoning_effort="max",
             status="completed",
             summary="Standard-route Luna implementation and planned checks completed",
             outcome="implemented",
@@ -206,8 +236,232 @@ class GuardianWorkflowTests(unittest.TestCase):
         self.assertEqual("start-request", dashboard["next_step"]["primary_action"]["id"])
         self.assertEqual("打开项目图", dashboard["next_step"]["reopen"]["phrase"])
         self.assertIn("回复下方", dashboard["next_step"]["reopen"]["instruction"])
-        self.assertEqual(3, len(dashboard["how_to_use"]))
+        self.assertEqual(4, len(dashboard["how_to_use"]))
         self.assertEqual(1, dashboard["metrics"]["branches"])
+        self.assertEqual("max", dashboard["model_routing"]["luna_default_reasoning_effort"])
+        closeout = guardian.get_project_closeout(str(self.repo))
+        self.assertTrue(closeout["auto_render"])
+        self.assertEqual("reply_end", closeout["render_position"])
+        self.assertEqual("expand-project-map", closeout["expand_action"]["id"])
+        self.assertEqual(2, closeout["closeout_version"])
+
+    def test_requirement_discovery_keeps_one_open_question_and_no_worktree(self) -> None:
+        self.onboard()
+        started = guardian.start_requirement_discovery(
+            str(self.repo), "Repair order product", "Build a repair order product", "architecture", "product"
+        )
+        self.assertEqual("discovering_requirements", started["status"])
+        self.assertEqual("discovery", started["phase"])
+        first = guardian.update_requirement_discovery(
+            str(self.repo),
+            started["item_id"],
+            updates={"problem_statement": "Repair shops lose requests sent through chat"},
+            next_question={
+                "dimension": "stakeholders",
+                "prompt": "Who must use the first complete workflow?",
+                "reason": "The answer changes permissions and user experience",
+                "options": [
+                    {"id": "staff", "label": "Staff only", "description": "Customers keep using chat"},
+                    {
+                        "id": "everyone",
+                        "label": "Customers and staff",
+                        "description": "Customers submit and track requests directly",
+                        "recommended": True,
+                    },
+                ],
+            },
+        )
+        self.assertEqual("needs_user_decision", first["status"])
+        question_id = first["open_question"]["id"]
+        closeout = guardian.get_project_closeout(str(self.repo))
+        self.assertEqual("answer-requirement-decision", closeout["primary_action"]["id"])
+        self.assertEqual(1, closeout["alerts"]["needs_user_decision"])
+        dashboard = guardian.get_project_dashboard(str(self.repo))
+        self.assertEqual(1, dashboard["metrics"]["waiting_for_product_decision"])
+        self.assertEqual("discovery", dashboard["sections"]["requirements"][0]["phase"])
+        with self.assertRaisesRegex(guardian.GuardianError, "Resolve the current"):
+            guardian.update_requirement_discovery(
+                str(self.repo),
+                started["item_id"],
+                next_question={"dimension": "goal", "prompt": "Another question?", "reason": "Would change scope"},
+            )
+        answered = guardian.update_requirement_discovery(
+            str(self.repo),
+            started["item_id"],
+            resolved_question_id=question_id,
+            answer="Customers and staff",
+            updates={
+                "goal": "Prevent lost orders and show customers repair progress",
+                "stakeholders": ["Customer", "Front desk", "Technician", "Shop manager"],
+                "user_scenarios": ["Customer submits, staff assigns, technician updates, customer tracks"],
+                "current_state": "Requests arrive through chat and are copied to paper",
+                "functional_requirements": ["Submit request", "Assign technician", "Track repair state"],
+                "constraints": ["Separate each company's data"],
+                "acceptance_criteria": ["Every accepted request remains traceable through completion"],
+                "non_goals": ["No inventory or accounting in this scope"],
+                "protected_behaviors": ["Company data isolation cannot be weakened"],
+            },
+        )
+        self.assertTrue(answered["requirements_complete"])
+        self.assertEqual("discovering_requirements", answered["status"])
+        finalized = guardian.finalize_requirement_discovery(
+            str(self.repo), started["item_id"], "A multi-role repair order product with tenant isolation"
+        )
+        self.assertEqual("designing_solution", finalized["status"])
+        with self.assertRaisesRegex(guardian.GuardianError, "Complete and review"):
+            guardian.bind_work_item(
+                str(self.repo), started["item_id"], "premature-executor", str(self.add_codex_worktree())
+            )
+
+    def test_material_solution_tradeoff_waits_for_user_then_document_review_unlocks_planning(self) -> None:
+        discovered = self.create_discovered_feature()
+        item_id = discovered["item_id"]
+        designed = guardian.record_solution_design(
+            str(self.repo),
+            item_id,
+            complexity="nontrivial",
+            approaches=[
+                {
+                    "id": "atomic",
+                    "name": "All or nothing",
+                    "summary": "Reject the complete batch when one record fails",
+                    "fit_score": 7,
+                    "effort": "M",
+                    "risk": "Low",
+                    "pros": ["Simple consistency"],
+                    "cons": ["One invalid record blocks useful work"],
+                },
+                {
+                    "id": "partial",
+                    "name": "Partial success with report",
+                    "summary": "Apply valid records and produce a complete failure report",
+                    "fit_score": 9,
+                    "effort": "M",
+                    "risk": "Medium",
+                    "pros": ["Large batches still make progress"],
+                    "cons": ["Requires explicit result reporting"],
+                    "reuses": ["Existing per-record validation"],
+                },
+            ],
+            recommendation_id="partial",
+            recommendation_reason="It matches the stated need for useful progress and explicit failures",
+            confidence=0.9,
+            decision_signals=["user_visible_behavior", "business_rule"],
+            decision_question="Should one invalid record cancel the whole batch, or should valid records still change?",
+        )
+        self.assertEqual("needs_user_decision", designed["status"])
+        decision_id = designed["open_decision"]["id"]
+        chosen = guardian.record_solution_decision(
+            str(self.repo), item_id, decision_id, "partial", "Use partial success and show every failure"
+        )
+        self.assertEqual("reviewing_design", chosen["status"])
+        reviewed = guardian.review_design_contract(
+            str(self.repo),
+            item_id,
+            reviewer_thread_id="cold-design-review",
+            scores={"completeness": 9, "consistency": 9, "clarity": 8, "scope": 9, "feasibility": 9},
+            outcome="passed",
+            summary="The contract is complete, bounded, testable, and implementable",
+        )
+        self.assertEqual("defined", reviewed["status"])
+        self.assertEqual("ready", reviewed["phase"])
+        self.assertIn("Partial success with report", reviewed["markdown"])
+        guardian.assess_work_item_risk(
+            str(self.repo), item_id, ["single_module_change"], "Known one-module feature after discovery"
+        )
+        guardian.record_task_stage(
+            str(self.repo), item_id, "planning", "terra-design-plan",
+            "gpt-5.6-terra", "high", "completed", "Plan implements the reviewed contract", "ready",
+            artifact=reviewed["artifact_uri"],
+        )
+        tree = self.add_codex_worktree()
+        binding = guardian.bind_work_item(str(self.repo), item_id, "luna-design-exec", str(tree))
+        self.assertEqual(str(tree.resolve()), binding["worktree_path"])
+
+    def test_clear_recommendation_is_selected_without_forcing_mvp_or_user_prompt(self) -> None:
+        discovered = self.create_discovered_feature("Export operational report")
+        result = guardian.record_solution_design(
+            str(self.repo),
+            discovered["item_id"],
+            complexity="nontrivial",
+            approaches=[
+                {
+                    "id": "new-stack",
+                    "name": "Separate reporting stack",
+                    "summary": "Create a second storage and reporting subsystem",
+                    "fit_score": 4,
+                    "effort": "XL",
+                    "risk": "High",
+                    "pros": ["Maximum isolation"],
+                    "cons": ["Duplicates existing data and operations"],
+                },
+                {
+                    "id": "reuse",
+                    "name": "Reuse existing query pipeline",
+                    "summary": "Add the confirmed export to the current reporting boundary",
+                    "fit_score": 10,
+                    "effort": "M",
+                    "risk": "Low",
+                    "pros": ["Matches current architecture and permissions"],
+                    "cons": ["Must preserve current query limits"],
+                    "reuses": ["Existing reporting query and audit log"],
+                },
+            ],
+            recommendation_id="reuse",
+            recommendation_reason="It completely satisfies the confirmed requirement with the least architectural risk",
+            confidence=0.95,
+        )
+        self.assertEqual("reviewing_design", result["status"])
+        self.assertIsNone(result["open_decision"])
+        self.assertEqual("reuse", result["selected_approach"]["id"])
+
+    def test_reopened_contract_invalidates_planning_from_the_previous_revision(self) -> None:
+        discovered = self.create_discovered_feature("Use the existing safe batch boundary")
+        item_id = discovered["item_id"]
+        approach = {
+            "id": "reuse",
+            "name": "Reuse the safe boundary",
+            "summary": "Extend the existing validated operation without a second subsystem",
+            "fit_score": 10,
+            "effort": "M",
+            "risk": "Low",
+            "pros": ["Preserves existing behavior"],
+            "cons": ["Must respect current throughput limits"],
+        }
+        guardian.record_solution_design(
+            str(self.repo), item_id, "simple", [approach], "reuse",
+            "One solution clearly satisfies the reviewed requirement", 0.95,
+        )
+        guardian.review_design_contract(
+            str(self.repo), item_id, "cold-review-v1",
+            {"completeness": 9, "consistency": 9, "clarity": 9, "scope": 9, "feasibility": 9},
+            "passed", "Revision one is ready",
+        )
+        guardian.assess_work_item_risk(
+            str(self.repo), item_id, ["single_module_change"], "One-module implementation"
+        )
+        guardian.record_task_stage(
+            str(self.repo), item_id, "planning", "terra-plan-v1",
+            "gpt-5.6-terra", "high", "completed", "Revision one planned", "ready",
+        )
+        reopened = guardian.reopen_design_contract(
+            str(self.repo), item_id, "Repository evidence shows the throughput constraint needs a revised design"
+        )
+        self.assertEqual("designing_solution", reopened["status"])
+        self.assertEqual(1, len(reopened["contract"]["revision_history"]))
+        guardian.record_solution_design(
+            str(self.repo), item_id, "simple", [approach], "reuse",
+            "The revised design now includes the verified throughput constraint", 0.95,
+        )
+        guardian.review_design_contract(
+            str(self.repo), item_id, "cold-review-v2",
+            {"completeness": 9, "consistency": 9, "clarity": 9, "scope": 9, "feasibility": 9},
+            "passed", "Revision two is ready",
+        )
+        with self.assertRaisesRegex(guardian.GuardianError, "current design-contract revision"):
+            guardian.bind_work_item(
+                str(self.repo), item_id, "luna-revision-two", str(self.add_codex_worktree())
+            )
 
     def test_single_greenfield_code_line_is_selected_as_baseline(self) -> None:
         repo = self.base / "greenfield"
@@ -346,7 +600,7 @@ class GuardianWorkflowTests(unittest.TestCase):
         )["route"]
         self.assertEqual("low", low_route["level"])
         self.assertEqual(("gpt-5.6-terra", "medium"), guardian._expected_stage_model(guardian.get_work_item(str(self.repo), low["id"]), "planning"))
-        self.assertEqual(("gpt-5.6-luna", "high"), guardian._expected_stage_model(guardian.get_work_item(str(self.repo), low["id"]), "execution"))
+        self.assertEqual(("gpt-5.6-luna", "max"), guardian._expected_stage_model(guardian.get_work_item(str(self.repo), low["id"]), "execution"))
 
         standard = guardian.create_work_item(
             str(self.repo), "Add one option", "Add one engine option", "Support the option", "feature",
@@ -358,6 +612,7 @@ class GuardianWorkflowTests(unittest.TestCase):
         self.assertEqual("standard", standard_route["level"])
         self.assertEqual("gpt-5.6-terra", standard_route["stages"][0]["model"])
         self.assertEqual("high", standard_route["stages"][0]["reasoning_effort"])
+        self.assertEqual("max", standard_route["stages"][1]["reasoning_effort"])
 
         high = guardian.create_work_item(
             str(self.repo), "Replace architecture", "Replace the engine architecture", "Create new boundaries", "architecture",
@@ -369,7 +624,18 @@ class GuardianWorkflowTests(unittest.TestCase):
         self.assertEqual("high", high_route["level"])
         self.assertEqual("judgment", high_route["execution_track"])
         self.assertEqual("gpt-5.6-sol", high_route["stages"][0]["model"])
+        self.assertEqual("max", high_route["stages"][0]["reasoning_effort"])
         self.assertEqual("gpt-5.6-terra", high_route["stages"][1]["model"])
+
+        focused = guardian.create_work_item(
+            str(self.repo), "Tune core choice", "Improve core choice", "Improve the algorithm", "feature",
+            ["Decision quality improves"], ["No protocol change"], ["Existing inputs remain compatible"],
+        )
+        focused_route = guardian.assess_work_item_risk(
+            str(self.repo), focused["id"], ["core_algorithm"], "Core algorithm with a stable implementation boundary"
+        )["route"]
+        self.assertEqual("gpt-5.6-luna", focused_route["stages"][1]["model"])
+        self.assertEqual("max", focused_route["stages"][1]["reasoning_effort"])
 
     def test_low_risk_documentation_diff_uses_proportionate_evidence(self) -> None:
         item = {
@@ -378,13 +644,82 @@ class GuardianWorkflowTests(unittest.TestCase):
             }
         }
         self.assertEqual(
-            ["target", "independent_review"],
+            ["target", "automated_guard"],
             guardian._required_evidence_kinds(item, {"changed_files": ["README.md", "docs/setup.rst"]}),
         )
         self.assertEqual(
-            ["target", "related", "full", "independent_review", "integration"],
+            ["target", "related", "automated_guard", "integration"],
             guardian._required_evidence_kinds(item, {"changed_files": ["tests/EngineTests.cs"]}),
         )
+
+    def test_low_risk_automated_guard_replaces_ai_review_and_reuses_evidence(self) -> None:
+        self.onboard()
+        item = guardian.create_work_item(
+            str(self.repo), "Document setup", "Add setup instructions", "Document setup", "maintenance",
+            ["README explains setup"], ["No runtime change"], ["Runtime remains unchanged"],
+        )
+        guardian.assess_work_item_risk(
+            str(self.repo), item["id"], ["test_or_docs_only", "localized_change"], "Documentation-only maintenance"
+        )
+        guardian.record_task_stage(
+            str(self.repo), item["id"], "planning", "terra-low-plan",
+            "gpt-5.6-terra", "medium", "completed", "Contained documentation plan", "ready",
+        )
+        worktree = self.add_codex_worktree()
+        guardian.bind_work_item(str(self.repo), item["id"], "luna-low-exec", str(worktree))
+        guardian.set_change_scope(
+            str(self.repo), item["id"], [{"path": "README.md", "reason": "Setup documentation"}], []
+        )
+        guardian.record_evidence(str(self.repo), item["id"], "baseline", True, "Baseline recorded")
+        (worktree / "README.md").write_text("# Setup\n\nRun the app.\n", encoding="utf-8")
+        guardian.scan_changes(str(self.repo), item["id"])
+        guardian.record_task_stage(
+            str(self.repo), item["id"], "execution", "luna-low-exec",
+            "gpt-5.6-luna", "max", "completed", "Documentation implemented", "implemented",
+        )
+        guardian.record_evidence(str(self.repo), item["id"], "target", True, "README contains setup")
+        guard = guardian.run_automated_guard(str(self.repo), item["id"])
+        self.assertTrue(guard["success"], guard["failed_checks"])
+        plan = guardian.get_verification_plan(str(self.repo), item["id"])
+        self.assertIn("target", plan["reusable_evidence"])
+        self.assertIn("automated_guard", plan["reusable_evidence"])
+        readiness = guardian.check_merge_readiness(str(self.repo), item["id"])
+        self.assertTrue(readiness["ready"], readiness["blockers"])
+        capsule = guardian.get_work_context(str(self.repo), item["id"])
+        self.assertEqual("automated_guard", capsule["risk_route"]["review_mode"])
+        self.assertEqual(2, len(capsule["latest_stage_runs"]))
+
+    def test_low_risk_guard_alert_routes_to_focused_ai_review(self) -> None:
+        item = {
+            "orchestration": {
+                "profile": guardian.MODEL_ORCHESTRATION_PROFILE,
+                "risk_assessment": {"assessed": True, "level": "low"},
+            },
+            "evidence": [{"kind": "automated_guard", "success": False}],
+        }
+        self.assertEqual(
+            ["target", "related", "independent_review", "integration"],
+            guardian._required_evidence_kinds(item, {"changed_files": ["src/Engine.cs"]}),
+        )
+
+    def test_max_capability_fallback_must_be_explicit(self) -> None:
+        item, _ = self.create_candidate()
+        stored = guardian.get_work_item(str(self.repo), item["id"])
+        executor_thread = stored["task"]["thread_id"]
+        with self.assertRaisesRegex(guardian.GuardianError, "explicit capability fallback"):
+            guardian.record_task_stage(
+                str(self.repo), item["id"], "execution", executor_thread,
+                "gpt-5.6-luna", "xhigh", "completed", "Fallback without evidence", "implemented",
+            )
+        orchestration = guardian.record_task_stage(
+            str(self.repo), item["id"], "execution", executor_thread,
+            "gpt-5.6-luna", "xhigh", "completed", "App surface lacks Max", "implemented",
+            fallback_reason="Current Codex surface does not expose Max for Luna",
+        )
+        run = orchestration["runs"][-1]
+        self.assertTrue(run["capability_fallback"])
+        self.assertEqual("max", run["expected_reasoning_effort"])
+        self.assertTrue(guardian._run_matches_current_route(guardian.get_work_item(str(self.repo), item["id"]), run, "execution"))
 
     def test_model_stage_requires_automatic_risk_assessment(self) -> None:
         self.onboard()
@@ -419,7 +754,7 @@ class GuardianWorkflowTests(unittest.TestCase):
             )
         guardian.record_task_stage(
             str(self.repo), item["id"], "execution", executor_thread,
-            "gpt-5.6-luna", "xhigh", "completed", "Implementation ready", "implemented"
+            "gpt-5.6-luna", "max", "completed", "Implementation ready", "implemented"
         )
         with self.assertRaises(guardian.GuardianError):
             guardian.record_task_stage(
@@ -437,7 +772,7 @@ class GuardianWorkflowTests(unittest.TestCase):
             )
         guardian.record_task_stage(
             str(self.repo), item["id"], "major_fix", "sol-major-fixer",
-            "gpt-5.6-sol", "xhigh", "completed", "Major regression fixed", "fixed"
+            "gpt-5.6-sol", "max", "completed", "Major regression fixed", "fixed"
         )
         with self.assertRaises(guardian.GuardianError):
             guardian.record_task_stage(
@@ -448,7 +783,7 @@ class GuardianWorkflowTests(unittest.TestCase):
             str(self.repo), item["id"], "final_review", "sol-final-review",
             "gpt-5.6-sol", "xhigh", "completed", "Fresh independent review passed", "passed"
         )
-        self.assertEqual("adaptive-risk-v1", orchestration["profile"])
+        self.assertEqual("adaptive-risk-v2", orchestration["profile"])
         self.assertEqual("final_review", orchestration["runs"][-1]["stage"])
 
     def test_merge_is_blocked_without_completed_model_pipeline(self) -> None:
@@ -458,9 +793,9 @@ class GuardianWorkflowTests(unittest.TestCase):
         self.assertTrue(any("gpt-5.6-luna" in reason for reason in reasons))
         self.assertTrue(any("gpt-5.6-terra" in reason for reason in reasons))
 
-    def test_three_failures_trigger_architecture_review(self) -> None:
+    def test_two_failures_trigger_architecture_review(self) -> None:
         item, worktree = self.create_candidate()
-        for number in range(3):
+        for number in range(2):
             result = guardian.record_attempt(str(self.repo), item["id"], False, f"attempt {number + 1} failed")
         self.assertTrue(result["architecture_review_required"])
         self.assertEqual("architecture_review", result["status"])
@@ -522,9 +857,30 @@ class GuardianWorkflowTests(unittest.TestCase):
         state["architecture"].pop("graph", None)
         path.write_text(json.dumps(state), encoding="utf-8")
         migrated = guardian.project_init(str(self.repo))
-        self.assertEqual(4, migrated["schema_version"])
-        self.assertEqual("adaptive-risk-v1", migrated["settings"]["model_orchestration_profile"])
+        self.assertEqual(6, migrated["schema_version"])
+        self.assertEqual("adaptive-risk-v2", migrated["settings"]["model_orchestration_profile"])
         self.assertEqual(["dotnet test App.csproj"], migrated["test_commands"])
+
+    def test_existing_v1_work_item_keeps_its_started_route(self) -> None:
+        self.onboard()
+        item = guardian.create_work_item(
+            str(self.repo), "Existing work", "Continue existing work", "Finish existing work", "feature",
+            ["Work finishes"], ["No migration"], ["Compatibility remains"],
+        )
+        guardian.assess_work_item_risk(
+            str(self.repo), item["id"], ["single_module_change"], "Existing one-module work"
+        )
+        path = guardian._project_file(str(self.repo))
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state["schema_version"] = 4
+        state["settings"]["model_orchestration_profile"] = guardian.PREVIOUS_ADAPTIVE_ORCHESTRATION_PROFILE
+        state["work_items"][0]["orchestration"]["profile"] = guardian.PREVIOUS_ADAPTIVE_ORCHESTRATION_PROFILE
+        path.write_text(json.dumps(state), encoding="utf-8")
+        migrated = guardian.project_init(str(self.repo))
+        self.assertEqual(guardian.MODEL_ORCHESTRATION_PROFILE, migrated["settings"]["model_orchestration_profile"])
+        stored = guardian.get_work_item(str(self.repo), item["id"])
+        self.assertEqual(guardian.PREVIOUS_ADAPTIVE_ORCHESTRATION_PROFILE, stored["orchestration"]["profile"])
+        self.assertEqual(("gpt-5.6-luna", "xhigh"), guardian._expected_stage_model(stored, "execution"))
 
 
 class McpProtocolTests(unittest.TestCase):
@@ -571,7 +927,7 @@ class McpProtocolTests(unittest.TestCase):
                 check=True,
             )
             messages = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
-            self.assertEqual("0.3.0", messages[0]["result"]["serverInfo"]["version"])
+            self.assertEqual("0.5.0", messages[0]["result"]["serverInfo"]["version"])
             self.assertTrue(messages[1]["result"]["structuredContent"]["ok"])
             project_map = messages[2]["result"]["structuredContent"]
             self.assertEqual("中文项目", project_map["name"])
@@ -584,6 +940,13 @@ class McpProtocolTests(unittest.TestCase):
             self.assertEqual("gpt-5.6-terra", route["stages"][0]["model"])
             tool_names = {tool["name"] for tool in messages[5]["result"]["tools"]}
             self.assertIn("assess_work_item_risk", tool_names)
+            self.assertIn("get_project_closeout", tool_names)
+            self.assertIn("get_work_context", tool_names)
+            self.assertIn("get_verification_plan", tool_names)
+            self.assertIn("run_automated_guard", tool_names)
+            self.assertIn("start_requirement_discovery", tool_names)
+            self.assertIn("get_design_contract", tool_names)
+            self.assertIn("record_solution_design", tool_names)
 
 
 if __name__ == "__main__":

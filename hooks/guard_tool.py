@@ -52,7 +52,7 @@ def _relative_patch_path(raw: str, worktree: str) -> str | None:
 
 def _writer_stage_error(item: dict, session_id: str) -> str | None:
     orchestration = item.get("orchestration") or {}
-    if orchestration.get("profile") != guardian.MODEL_ORCHESTRATION_PROFILE:
+    if orchestration.get("profile") not in guardian.ADAPTIVE_ORCHESTRATION_PROFILES:
         return None
     active_writers = [
         run

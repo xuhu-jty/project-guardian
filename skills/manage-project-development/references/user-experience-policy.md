@@ -1,59 +1,66 @@
 # Beginner experience policy
 
+## Automatic end-of-turn project map
+
+A Codex task has no reliable permanent “conversation ended” event because the user can continue at any time. Treat each final Guardian reply as the stable boundary.
+
+Before every final reply:
+
+1. Call `get_project_closeout`.
+2. Render its compact mini map below the reply automatically.
+3. Show one plain-language current state and exactly one primary next action.
+4. Keep `展开完整项目图` secondary unless the full-map trigger applies.
+
+Automatically render `get_project_dashboard` after first onboarding, risk escalation, review failure, merge readiness, or an explicit `打开项目图` request. Do not reload or narrate the full dashboard on routine turns.
+
 ## What the user should understand without Git knowledge
 
-Project Guardian is operated through ordinary Codex messages. The user does not need to open a local HTML file, remember a tool name, choose a branch, or decide when to create a worktree.
+The user never needs to choose a branch, worktree, task, model, risk level, review mode, or context size. Ordinary phrases remain valid fallbacks:
 
-The stable entry phrases are:
+- `打开项目图`
+- `我下一步做什么`
+- `项目进度`
+- `查看分支和工作树`
 
-- `打开项目图` — show the current interactive project view below the reply.
-- `我下一步做什么` — show the same current state and one recommended action.
-- `项目进度` — focus the view on active, blocked, waiting-for-confirmation, and completed work.
-- `查看分支和工作树` — focus on what each code line contains and which Codex task owns it.
+New projects and features begin as a normal conversation. Never ask the user to select `product`, `internal`, `defect`, a work-item kind, or a contract phase.
 
-The map is conversation-embedded. It is not a permanent Codex sidebar page. It can be reopened from any Codex task whose working directory belongs to the guarded Git project.
+## Requirement conversation
 
-## Required response closeout
+- Show one question at a time and explain in one sentence why its answer changes the result.
+- Prefer the user's language. Keep architecture, schema, framework, and file decisions out of beginner questions.
+- When the user says “不知道”, do the analysis first, show concrete options and a recommendation, then ask only if the remaining choice materially changes the product.
+- Never describe the workflow as “MVP first”. Say Guardian is choosing the best-fit solution; a minimal, complete, phased, reuse-first, or replacement approach may win.
+- During discovery, the primary card shows `正在问清需求`, the single open question or missing dimension, and `还没有创建开发工作树`.
+- During solution design, show the recommendation and whether Guardian can proceed automatically.
+- During document review, show the five review dimensions and any one blocking concern.
 
-Every successful Guardian operation must end with three visible pieces, in this order:
+The map is embedded below the Codex reply, not a permanent sidebar page.
 
-1. `当前状态` — one plain-language sentence based on persisted state, never an invented percentage.
-2. `下一步` — exactly one recommended action. If interactive output is available, make it the only primary button.
-3. `如何回来` — `以后在这个项目的任意 Codex 任务里输入“打开项目图”即可重新打开。`
+## Information hierarchy
 
-Do not make the user choose among several equally prominent technical actions. Secondary actions such as viewing branches, modules, or progress belong below the primary action or inside tabs.
+The compact map shows, in order:
 
-## First-use behavior
+1. Project state and one-sentence summary.
+2. Active work item, status, risk, and current model stage.
+3. Drift, blocked, or waiting-for-merge alerts.
+4. One primary action.
+5. Secondary `展开完整项目图` action.
 
-After initialization or scanning:
+When present, place the requirement/design phase before the Git branch. Surface the selected approach in plain language; keep the full contract behind `查看需求与设计文档`.
 
-1. Call `get_project_dashboard`.
-2. Explain whether the project is unscanned, needs a real base, needs baseline tests, is blocked, or is ready.
-3. Render the dashboard automatically.
-4. If the state is `needs_base_selection`, offer `让 Codex 判断真实基线` as the primary action. The user should not need to name a branch unless evidence is genuinely ambiguous.
-5. If the state is ready and no work item exists, invite the user to describe one new feature or one observed problem in ordinary language.
-
-## Dashboard information hierarchy
-
-The first screen must answer “what now?” before showing inventory:
-
-- State label.
-- One-sentence summary.
-- One primary action with helper text explaining what it will and will not do.
-- Reopen hint: `输入“打开项目图”可随时回来`.
-
-Use tabs or progressive disclosure for:
-
-- `怎么使用`
-- `分支与工作树`
-- `功能模块`
-- `开发任务`
-
-Every branch action uses the exact persisted branch name. Every module action uses the exact module ID. Every task action uses the stored Codex `thread_id` when available. A visualization click may request Codex work or navigate to a task; it must never silently mutate Guardian state.
+The expanded dashboard contains `怎么使用`, `分支与工作树`, `功能模块`, and `开发任务`. Use exact persisted branch, module, work-item, and thread identifiers. A visualization click may navigate or request a follow-up; it must not silently mutate Guardian state.
 
 ## Empty, blocked, and completion states
 
-- No active work: say `直接告诉 Codex 要增加什么功能，或者哪里表现不对` and offer one start button.
-- Blocked: state the specific blocker and one recovery action. Do not expose a dead end.
-- Verification failed: continue the same task toward a passing result or architecture review; do not call the feature finished.
-- Merge ready: show completed work, evidence, drift, and risk, then ask for explicit merge confirmation. The primary button must not merge by itself.
+- No active work: say `直接告诉 Codex 要增加什么功能，或者哪里表现不对`.
+- Requirement discovery: continue the same item and ask only its next consequential question.
+- Needs user decision: show exactly one question, the recommendation, and the stakes; do not create a worktree.
+- Design review: continue the cold document review; do not claim the feature is ready for development.
+- Blocked: show the concrete blocker and one recovery action.
+- Verification failed: continue the same task or escalate; never call the feature finished.
+- Merge ready: show compact completed work, reusable evidence, drift, and risk, then ask for explicit confirmation. The button must not merge by itself.
+- After confirmed merge: show the completed node and the next single project action.
+
+## Token discipline
+
+Render structured state rather than asking the model to rewrite the map. Use `get_project_closeout` for routine turns, `get_work_context` for task handoff, exact module/symbol queries for code, and `get_verification_plan` for evidence. Never load a full map merely to produce the automatic end card.
